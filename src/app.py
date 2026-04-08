@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import logging
 
 from aiogram import Bot, Dispatcher
@@ -12,6 +13,7 @@ from .config import settings
 from .database import async_session_factory, get_expired_active_users, init_db
 from .functions import XUIAPI
 from .handlers import router
+from .reminders import run_subscription_reminder_tick
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,18 @@ async def _expired_subscriptions_worker(bot: Bot) -> None:
         await asyncio.sleep(3600)
 
 
+async def _subscription_reminders_worker(bot: Bot) -> None:
+    """Каждые 5 минут: напоминания за 24 ч и за 1 ч до окончания подписки."""
+
+    while True:
+        try:
+            await run_subscription_reminder_tick(bot, now=dt.datetime.now(tz=dt.timezone.utc))
+        except Exception:
+            logger.exception("Subscription reminders worker iteration failed")
+
+        await asyncio.sleep(300)
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -81,12 +95,16 @@ async def main() -> None:
     dp.include_router(router)
 
     worker_task = asyncio.create_task(_expired_subscriptions_worker(bot))
+    reminders_task = asyncio.create_task(_subscription_reminders_worker(bot))
     try:
         await dp.start_polling(bot)
     finally:
         worker_task.cancel()
+        reminders_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await worker_task
+        with contextlib.suppress(asyncio.CancelledError):
+            await reminders_task
 
 
 if __name__ == "__main__":

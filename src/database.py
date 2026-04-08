@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func, select, update
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -57,7 +57,13 @@ class User(Base):
 
     subscription_start: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     subscription_end: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_notified_24h: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Значение subscription_end, для которого уже отправлено напоминание (чтобы не дублировать при продлении).
+    reminder_24h_for_subscription_end: Mapped[Optional[dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reminder_1h_for_subscription_end: Mapped[Optional[dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     vless_uuid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     vless_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -115,11 +121,29 @@ engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+async def _sqlite_add_user_reminder_columns(conn) -> None:
+    if "sqlite" not in settings.DATABASE_URL.lower():
+        return
+    result = await conn.execute(text("PRAGMA table_info(users)"))
+    cols = {row[1] for row in result.all()}
+    if not cols:
+        return
+    if "reminder_24h_for_subscription_end" not in cols:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN reminder_24h_for_subscription_end DATETIME")
+        )
+    if "reminder_1h_for_subscription_end" not in cols:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN reminder_1h_for_subscription_end DATETIME")
+        )
+
+
 async def init_db() -> None:
     """Create DB tables if they do not exist."""
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _sqlite_add_user_reminder_columns(conn)
 
 
 async def create_user_if_not_exists(
@@ -261,6 +285,29 @@ async def get_all_users(session: AsyncSession, *, offset: int = 0, limit: int = 
 
 async def get_active_users(session: AsyncSession, *, offset: int = 0, limit: int = 50) -> list[User]:
     stmt = select(User).where(User.is_active.is_(True)).order_by(User.id.desc()).offset(offset).limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_active_users_subscription_ending_within(
+    session: AsyncSession,
+    *,
+    now: dt.datetime,
+    within_hours: int = 48,
+    limit: int = 5000,
+) -> list[User]:
+    """Активные пользователи с окончанием подписки в ближайшие `within_hours` (для напоминаний)."""
+
+    horizon = now + dt.timedelta(hours=within_hours)
+    stmt = (
+        select(User)
+        .where(User.is_active.is_(True))
+        .where(User.subscription_end.is_not(None))
+        .where(User.subscription_end > now)
+        .where(User.subscription_end <= horizon)
+        .order_by(User.subscription_end.asc())
+        .limit(limit)
+    )
     result = await session.execute(stmt)
     return list(result.scalars().all())
 
@@ -530,6 +577,8 @@ async def reset_trial_for_user(session: AsyncSession, *, telegram_id: int) -> Us
     # Reset trial-linked subscription state and profile mapping.
     user.subscription_start = None
     user.subscription_end = None
+    user.reminder_24h_for_subscription_end = None
+    user.reminder_1h_for_subscription_end = None
     user.is_active = False
     user.vless_uuid = None
     user.vless_email = None
