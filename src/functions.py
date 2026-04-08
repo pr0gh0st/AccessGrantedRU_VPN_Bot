@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
+from urllib.parse import quote
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -419,17 +420,32 @@ class XUIAPI:
         remark: Optional[str] = None,
         include_fragment: bool = False,
     ) -> str:
+        sid = self._normalize_short_id(settings.REALITY_SHORT_ID)
+        spx_encoded = quote(settings.REALITY_SPIDER_X or "/", safe="")
         url = (
             f"vless://{client_id}@{host}:{port}"
-            f"?type=tcp&security=reality&pbk={settings.REALITY_PUBLIC_KEY}"
+            f"?type=tcp&encryption=none&security=reality&pbk={settings.REALITY_PUBLIC_KEY}"
             f"&fp={settings.REALITY_FINGERPRINT}"
             f"&sni={settings.REALITY_SNI}"
-            f"&sid={settings.REALITY_SHORT_ID}"
-            f"&spx={settings.REALITY_SPIDER_X}"
+            f"&sid={sid}"
+            f"&spx={spx_encoded}"
         )
         if include_fragment and remark:
             url += f"#{remark}"
         return url
+
+    def _normalize_short_id(self, value: str) -> str:
+        """
+        Some users paste multiple short IDs from panel export, e.g.:
+        'c6b2,e748b3...,39,...'
+        For client URL we should use one short id (usually first).
+        """
+
+        raw = (value or "").strip()
+        if not raw:
+            return raw
+        first = raw.split(",")[0].strip()
+        return first
 
     async def _client_exists(self, *, inbound_id: int, client_id: str, email: Optional[str]) -> bool:
         inbound = await self.get_inbound(inbound_id)

@@ -4,7 +4,7 @@ import datetime as dt
 import json
 import logging
 import uuid
-from typing import Optional, Tuple
+from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +36,19 @@ def _is_subscription_active(user: User) -> bool:
     if user.subscription_end is None:
         return False
     return user.subscription_end > _utc_now()
+
+
+def _to_xui_expiry_ms(value: Optional[dt.datetime]) -> int:
+    """
+    Convert datetime to unix milliseconds for 3X-UI client `expiryTime`.
+    0 means unlimited in XUI.
+    """
+
+    if value is None:
+        return 0
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    return int(value.timestamp() * 1000)
 
 
 async def get_or_create_user(
@@ -81,25 +94,26 @@ async def activate_trial_and_create_vless_profile(
     if not isinstance(port, int):
         raise ServiceError("Не удалось определить port во входящем (inbound) в XUI.")
 
+    # 1) Mark trial as used in DB (prevents double-spend).
+    try:
+        user = await activate_trial(session, telegram_id=user.telegram_id, trial_days=settings.TRIAL_DAYS)
+    except Exception as e:
+        raise ServiceError(f"Не удалось активировать trial: {e}") from e
+
+    expiry_ms = _to_xui_expiry_ms(user.subscription_end)
     client_settings = {
         # For VLESS/VMESS: `client.id` is UUID.
         "id": vless_uuid,
         # For XUI API compatibility: `email` is often present in responses/payloads.
         "email": vless_email,
         "enable": True,
-        "expiryTime": 0,
+        "expiryTime": expiry_ms,
         "totalGB": 0,
         "limitIp": 0,
         "tgId": "",
         "subId": "",
         "flow": "",
     }
-
-    # 1) Mark trial as used in DB (prevents double-spend).
-    try:
-        await activate_trial(session, telegram_id=user.telegram_id, trial_days=settings.TRIAL_DAYS)
-    except Exception as e:
-        raise ServiceError(f"Не удалось активировать trial: {e}") from e
 
     # 2) Create the client in XUI. If this fails - rollback DB trial state.
     try:
@@ -176,7 +190,7 @@ async def ensure_vless_profile_for_user(
         "id": vless_uuid,
         "email": vless_email,
         "enable": True,
-        "expiryTime": 0,
+        "expiryTime": _to_xui_expiry_ms(user.subscription_end),
         "totalGB": 0,
         "limitIp": 0,
         "tgId": "",
