@@ -68,12 +68,21 @@ class XUIAPI:
                 "/panel/api",
             ]
             self._login_path_candidates = [
+                # Most common mounts:
                 f"/{self._base_path}/login",
+                f"/{self._base_path}/login/",
+                # Some reverse-proxy configs mount UI under /panel
+                f"/{self._base_path}/panel/login",
+                f"/{self._base_path}/panel/login/",
+                # Fallback to root:
                 "/login",
+                "/login/",
+                "/panel/login",
+                "/panel/login/",
             ]
         else:
             self._api_root_candidates = ["/panel/api"]
-            self._login_path_candidates = ["/login"]
+            self._login_path_candidates = ["/login", "/login/", "/panel/login", "/panel/login/"]
 
         self._api_root = self._api_root_candidates[0]
         self._login_path = self._login_path_candidates[0]
