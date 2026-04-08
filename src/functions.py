@@ -68,6 +68,9 @@ class XUIAPI:
                 "/panel/api",
             ]
             self._login_path_candidates = [
+                # Some deployments mount the panel root at /<CUSTOM_PATH> (no /login at all)
+                f"/{self._base_path}",
+                f"/{self._base_path}/",
                 # Most common mounts:
                 f"/{self._base_path}/login",
                 f"/{self._base_path}/login/",
