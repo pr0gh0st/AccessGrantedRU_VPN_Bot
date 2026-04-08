@@ -6,7 +6,7 @@ from typing import Any, Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User as TgUser
 
 from .config import settings
 from .database import async_session_factory
@@ -130,9 +130,10 @@ async def help_handler(message: Message) -> None:
 
 
 @router.message(Command("profile"))
-async def profile_handler(message: Message) -> None:
+async def profile_handler(message: Message, event_user: Optional[TgUser] = None) -> None:
+    tg = event_user if event_user is not None else message.from_user
     async with async_session_factory() as session:
-        user = await _get_user_for_message(session, message.from_user)
+        user = await _get_user_for_message(session, tg)
 
     await message.answer(_profile_status_text(user), reply_markup=profile_inline_kb())
 
@@ -149,9 +150,10 @@ async def buy_handler(message: Message) -> None:
 
 
 @router.message(Command("myvpn"))
-async def myvpn_handler(message: Message) -> None:
+async def myvpn_handler(message: Message, event_user: Optional[TgUser] = None) -> None:
+    tg = event_user if event_user is not None else message.from_user
     async with async_session_factory() as session:
-        user = await _get_user_for_message(session, message.from_user)
+        user = await _get_user_for_message(session, tg)
 
     subscription_active = _is_subscription_active(user)
     has_vless_profile = bool(user.vless_uuid and user.vless_remark)
@@ -174,56 +176,58 @@ async def myvpn_handler(message: Message) -> None:
 
 
 @router.message(Command("traffic"))
-async def traffic_handler(message: Message) -> None:
+async def traffic_handler(message: Message, event_user: Optional[TgUser] = None) -> None:
+    tg = event_user if event_user is not None else message.from_user
     async with async_session_factory() as session:
-        user = await _get_user_for_message(session, message.from_user)
+        user = await _get_user_for_message(session, tg)
 
-    if not _is_subscription_active(user):
-        await message.answer("Подписка не активна — трафик недоступен.", reply_markup=main_menu_inline_kb())
-        return
+        if not _is_subscription_active(user):
+            await message.answer("Подписка не активна — трафик недоступен.", reply_markup=main_menu_inline_kb())
+            return
 
-    if not user.vless_uuid:
-        await message.answer("Сначала создайте VLESS профиль в разделе «Мой VPN».", reply_markup=main_menu_inline_kb())
-        return
+        if not user.vless_uuid:
+            await message.answer("Сначала создайте VLESS профиль в разделе «Мой VPN».", reply_markup=main_menu_inline_kb())
+            return
 
-    try:
-        xui = XUIAPI()
         try:
-            traffic = await fetch_and_update_traffic_for_user(session=session, user=user, xui=xui)
-        finally:
-            await xui.close()
-    except ServiceError as e:
-        await message.answer(f"Не удалось получить трафик: {e}", reply_markup=main_menu_inline_kb())
-        return
-    except Exception as e:
-        logger.exception("traffic error")
-        await message.answer("Произошла ошибка при обращении к XUI. Попробуйте позже.", reply_markup=main_menu_inline_kb())
-        return
+            xui = XUIAPI()
+            try:
+                traffic = await fetch_and_update_traffic_for_user(session=session, user=user, xui=xui)
+            finally:
+                await xui.close()
+        except ServiceError as e:
+            await message.answer(f"Не удалось получить трафик: {e}", reply_markup=main_menu_inline_kb())
+            return
+        except Exception as e:
+            logger.exception("traffic error")
+            await message.answer("Произошла ошибка при обращении к XUI. Попробуйте позже.", reply_markup=main_menu_inline_kb())
+            return
 
-    await message.answer(
-        "Статистика трафика\n"
-        f"Upload: {format_bytes_gb(traffic.uploaded_bytes)}\n"
-        f"Download: {format_bytes_gb(traffic.downloaded_bytes)}\n"
-        f"Total: {format_bytes_gb(traffic.total_bytes)}",
-        reply_markup=main_menu_inline_kb(),
-    )
+        await message.answer(
+            "Статистика трафика\n"
+            f"Upload: {format_bytes_gb(traffic.uploaded_bytes)}\n"
+            f"Download: {format_bytes_gb(traffic.downloaded_bytes)}\n"
+            f"Total: {format_bytes_gb(traffic.total_bytes)}",
+            reply_markup=main_menu_inline_kb(),
+        )
 
 
 @router.callback_query(F.data.startswith("nav:"))
 async def nav_callback_handler(call: CallbackQuery) -> None:
+    # Для inline-кнопок у call.message.from_user часто бот, не клиент — передаём call.from_user в хендлеры.
     assert call.data is not None
     action = call.data.split(":", 1)[1]
     if action == "menu":
         await call.message.edit_text("Меню:", reply_markup=main_menu_inline_kb())
     elif action == "profile":
         await call.answer()
-        await profile_handler(call.message)
+        await profile_handler(call.message, call.from_user)
     elif action == "myvpn":
         await call.answer()
-        await myvpn_handler(call.message)
+        await myvpn_handler(call.message, call.from_user)
     elif action == "traffic":
         await call.answer()
-        await traffic_handler(call.message)
+        await traffic_handler(call.message, call.from_user)
     elif action == "buy":
         await call.answer()
         await buy_handler(call.message)
@@ -421,5 +425,5 @@ async def vpn_confirm_delete_yes_callback(call: CallbackQuery) -> None:
 @router.callback_query(F.data == "vpn:confirm_delete_no")
 async def vpn_confirm_delete_no_callback(call: CallbackQuery) -> None:
     await call.answer()
-    await myvpn_handler(call.message)
+    await myvpn_handler(call.message, call.from_user)
 

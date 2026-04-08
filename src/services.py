@@ -33,10 +33,20 @@ def _utc_now() -> dt.datetime:
     return dt.datetime.now(tz=dt.timezone.utc)
 
 
+def _normalize_db_datetime_utc(value: Optional[dt.datetime]) -> Optional[dt.datetime]:
+    """SQLite often returns naive datetimes; treat them as UTC for comparisons."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
 def _is_subscription_active(user: User) -> bool:
-    if user.subscription_end is None:
+    end = _normalize_db_datetime_utc(user.subscription_end)
+    if end is None:
         return False
-    return user.subscription_end > _utc_now()
+    return end > _utc_now()
 
 
 def _to_xui_expiry_ms(value: Optional[dt.datetime]) -> int:
