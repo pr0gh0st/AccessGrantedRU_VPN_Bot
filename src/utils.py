@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html as html_module
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -26,6 +27,12 @@ def format_datetime_ru(value: Optional[dt.datetime]) -> str:
         value = value.replace(tzinfo=dt.timezone.utc)
     local = value.astimezone(_MOSCOW_TZ)
     return local.strftime("%Y-%m-%d %H:%M МСК")
+
+
+def vless_url_as_html_code(vless_url: str) -> str:
+    """Telegram HTML: VLESS-ссылка в моноширинном блоке для удобного копирования."""
+
+    return f"<code>{html_module.escape(vless_url)}</code>"
 
 
 def truncate_payload(text: str, *, max_len: int = 512) -> str:

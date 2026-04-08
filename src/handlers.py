@@ -34,7 +34,7 @@ from .services import (
     user_can_activate_trial,
     _is_subscription_active,
 )
-from .utils import format_bytes_gb, format_datetime_ru
+from .utils import format_bytes_gb, format_datetime_ru, vless_url_as_html_code
 
 logger = logging.getLogger(__name__)
 
@@ -296,8 +296,10 @@ async def trial_activate_callback(call: CallbackQuery) -> None:
 
     await call.answer()
     await call.message.answer("Trial активирован! Ваш VPN доступен.")
-    await call.message.answer("VLESS ссылка:")
-    await call.message.answer(vless_url)
+    await call.message.answer(
+        "VLESS ссылка:\n\n" + vless_url_as_html_code(vless_url),
+        parse_mode="HTML",
+    )
     await _send_vless_connection_help(call.message)
 
 
@@ -346,8 +348,10 @@ async def vpn_show_callback(call: CallbackQuery) -> None:
         return
 
     await call.answer()
-    await call.message.answer("Ваша VLESS ссылка:")
-    await call.message.answer(vless_url)
+    await call.message.answer(
+        "Ваша VLESS ссылка:\n\n" + vless_url_as_html_code(vless_url),
+        parse_mode="HTML",
+    )
     await _send_vless_connection_help(call.message)
 
 
@@ -372,8 +376,10 @@ async def vpn_create_callback(call: CallbackQuery) -> None:
 
     await call.answer()
     await call.message.answer("Профиль создан.")
-    await call.message.answer("VLESS ссылка:")
-    await call.message.answer(vless_url)
+    await call.message.answer(
+        "VLESS ссылка:\n\n" + vless_url_as_html_code(vless_url),
+        parse_mode="HTML",
+    )
     await _send_vless_connection_help(call.message)
 
 
