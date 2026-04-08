@@ -52,13 +52,31 @@ class XUIAPI:
         self._base_url = settings.XUI_API_URL.rstrip("/")
         self._base_path = (settings.XUI_BASE_PATH or "").strip("/")
 
-        # If panel is mounted under a custom prefix, API paths include it:
+        # Panel may be mounted under a custom prefix:
         #   http://host:port/<CUSTOM_PATH>/login
-        #   http://host:port/<CUSTOM_PATH>/panel/api/...
-        # If XUI_BASE_PATH is empty, we fall back to upstream defaults:
-        #   /login and /panel/api/...
-        self._api_root = f"/{self._base_path}/panel/api" if self._base_path else "/panel/api"
-        self._login_path = f"/{self._base_path}/login" if self._base_path else "/login"
+        #
+        # But API prefix may vary depending on version / reverse proxy:
+        #   /<CUSTOM_PATH>/panel/api/...
+        #   /<CUSTOM_PATH>/api/...
+        #   /panel/api/...
+        #
+        # We'll try candidates and lock onto the first working one.
+        if self._base_path:
+            self._api_root_candidates = [
+                f"/{self._base_path}/panel/api",
+                f"/{self._base_path}/api",
+                "/panel/api",
+            ]
+            self._login_path_candidates = [
+                f"/{self._base_path}/login",
+                "/login",
+            ]
+        else:
+            self._api_root_candidates = ["/panel/api"]
+            self._login_path_candidates = ["/login"]
+
+        self._api_root = self._api_root_candidates[0]
+        self._login_path = self._login_path_candidates[0]
 
         self._username = settings.XUI_USERNAME
         self._password = settings.XUI_PASSWORD
@@ -84,14 +102,25 @@ class XUIAPI:
         Body: { "username": "...", "password": "..." }
         """
 
+        last_status: Optional[int] = None
+        last_text: Optional[str] = None
+
         try:
-            r = await self._client.post(
-                self._login_path,
-                json={"username": self._username, "password": self._password},
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"XUI login failed with status={r.status_code}")
-            self._is_logged_in = True
+            for candidate in self._login_path_candidates:
+                r = await self._client.post(
+                    candidate,
+                    json={"username": self._username, "password": self._password},
+                )
+                last_status = r.status_code
+                # Successful auth usually returns 200 with JSON (or sometimes empty body)
+                if r.status_code == 200:
+                    self._login_path = candidate
+                    self._is_logged_in = True
+                    return
+                # keep small snippet for troubleshooting (no secrets)
+                last_text = (r.text or "")[:200]
+
+            raise RuntimeError(f"XUI login failed, last status={last_status}, body_snippet={last_text!r}")
         except httpx.HTTPError as e:
             raise RuntimeError(f"XUI login network error: {e}") from e
         except Exception:
@@ -123,6 +152,19 @@ class XUIAPI:
                 self._is_logged_in = False
                 await self.login()
                 r = await do_request()
+            elif r.status_code == 404 and self._base_path:
+                # Likely wrong API prefix (panel/api vs api). Try other candidates once.
+                for root in self._api_root_candidates:
+                    if root == self._api_root:
+                        continue
+                    alt_path = root + path[len(self._api_root) :] if path.startswith(self._api_root) else None
+                    if not alt_path:
+                        continue
+                    r2 = await self._client.request(method, alt_path, json=json_body)
+                    if r2.status_code != 404:
+                        self._api_root = root
+                        r = r2
+                        break
 
             r.raise_for_status()
             if r.content:
