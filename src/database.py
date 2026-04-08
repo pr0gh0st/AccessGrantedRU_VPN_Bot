@@ -365,3 +365,28 @@ async def update_traffic_stats(
     await session.commit()
     return user
 
+
+async def reset_trial_for_user(session: AsyncSession, *, telegram_id: int) -> User:
+    """
+    Reset trial state for a specific user.
+
+    Intended for admin recovery/debug operations.
+    """
+
+    user = await get_user_by_telegram_id(session, telegram_id)
+    if user is None:
+        raise LookupError("User not found")
+
+    user.is_trial_used = False
+    # Reset trial-linked subscription state and profile mapping.
+    user.subscription_start = None
+    user.subscription_end = None
+    user.is_active = False
+    user.vless_uuid = None
+    user.vless_email = None
+    user.vless_remark = None
+    user.vless_profile_data = None
+
+    await session.commit()
+    return user
+

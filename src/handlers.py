@@ -10,8 +10,10 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from .config import settings
 from .database import async_session_factory
+from .database import reset_trial_for_user
 from .functions import XUIAPI
 from .keyboards import (
+    admin_menu_inline_kb,
     confirm_delete_vpn_inline_kb,
     help_inline_kb,
     main_menu_inline_kb,
@@ -69,6 +71,10 @@ async def _get_user_for_message(session, tg_user) -> Any:
     )
 
 
+def _is_admin_user(user: Any) -> bool:
+    return bool(user.is_admin or (user.telegram_id in settings.admin_ids))
+
+
 async def _with_xui():
     xui = XUIAPI()
     try:
@@ -107,6 +113,23 @@ async def help_handler(message: Message) -> None:
         "/buy — покупка подписки\n\n"
         "Если возникли вопросы — напишите в поддержку.",
         reply_markup=help_inline_kb(),
+    )
+
+
+@router.message(Command("admin"))
+async def admin_handler(message: Message) -> None:
+    async with async_session_factory() as session:
+        user = await _get_user_for_message(session, message.from_user)
+
+    if not _is_admin_user(user):
+        await message.answer("Доступ запрещен. Команда доступна только администраторам.")
+        return
+
+    await message.answer(
+        "Админ-меню\n"
+        "Доступные действия:\n"
+        "- Сбросить trial себе",
+        reply_markup=admin_menu_inline_kb(),
     )
 
 
@@ -213,6 +236,24 @@ async def nav_callback_handler(call: CallbackQuery) -> None:
         await help_handler(call.message)
     else:
         await call.answer("Неизвестное действие.", show_alert=True)
+
+
+@router.callback_query(F.data == "admin:reset_trial_self")
+async def admin_reset_trial_self_callback(call: CallbackQuery) -> None:
+    async with async_session_factory() as session:
+        user = await _get_user_for_message(session, call.from_user)
+        if not _is_admin_user(user):
+            await call.answer("Только для админов.", show_alert=True)
+            return
+
+        await reset_trial_for_user(session, telegram_id=user.telegram_id)
+
+    await call.answer("Готово")
+    await call.message.answer(
+        "Trial для вашего аккаунта сброшен.\n"
+        "Теперь можно снова активировать trial через /start.",
+        reply_markup=admin_menu_inline_kb(),
+    )
 
 
 @router.callback_query(F.data == "trial:activate")

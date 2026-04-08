@@ -63,3 +63,12 @@ def help_inline_kb() -> InlineKeyboardMarkup:
         ]
     )
 
+
+def admin_menu_inline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Сбросить trial себе", callback_data="admin:reset_trial_self")],
+            [InlineKeyboardButton(text="Назад в меню", callback_data="nav:menu")],
+        ]
+    )
+
