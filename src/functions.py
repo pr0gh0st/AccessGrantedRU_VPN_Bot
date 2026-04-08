@@ -254,7 +254,35 @@ class XUIAPI:
         result = await self._request("GET", path)
         if not isinstance(result, dict):
             raise RuntimeError("Unexpected XUI get_inbound response")
-        return result
+        return self._extract_inbound_from_response(result)
+
+    def _extract_inbound_from_response(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Normalize inbound response shape across different 3X-UI versions.
+
+        Common variants:
+        - direct inbound object: {"id": 1, "port": 443, ...}
+        - wrapped response: {"success": true, "obj": {...inbound...}}
+        - wrapped response: {"data": {...inbound...}} / {"result": {...inbound...}}
+        """
+
+        if "port" in payload:
+            return payload
+
+        for key in ("obj", "data", "result"):
+            nested = payload.get(key)
+            if isinstance(nested, dict) and "port" in nested:
+                return nested
+
+        # Sometimes payload could be {"obj": {"inbound": {...}}}
+        for key in ("obj", "data", "result"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                inbound = nested.get("inbound")
+                if isinstance(inbound, dict) and "port" in inbound:
+                    return inbound
+
+        raise RuntimeError("XUI inbound response does not contain `port` in known fields")
 
     async def add_client(self, *, inbound_id: int, client: Mapping[str, Any]) -> None:
         """
