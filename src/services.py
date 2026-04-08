@@ -86,13 +86,14 @@ async def activate_trial_and_create_vless_profile(
     # Prepare stable identifiers used in VLESS URL and DB.
     vless_uuid = str(uuid.uuid4())
     vless_email = f"user-{user.telegram_id}"
-    vless_remark = f"tg-{user.telegram_id}"
+    vless_remark = f"AccessGranted-user-{user.telegram_id}"
 
     # Get inbound details (port), needed for VLESS URL.
     inbound = await xui.get_inbound(settings.INBOUND_ID)
     port = inbound.get("port")
     if not isinstance(port, int):
         raise ServiceError("Не удалось определить port во входящем (inbound) в XUI.")
+    reality_params = xui.extract_reality_params_from_inbound(inbound)
 
     # 1) Mark trial as used in DB (prevents double-spend).
     try:
@@ -142,6 +143,9 @@ async def activate_trial_and_create_vless_profile(
         host=settings.XUI_HOST,
         port=port,
         remark=vless_remark,
+        sni=reality_params.get("sni"),
+        sid=reality_params.get("sid"),
+        spider_x=reality_params.get("spider_x"),
     )
 
     vless_profile_data = json.dumps(client_settings, ensure_ascii=False)
@@ -173,6 +177,7 @@ async def ensure_vless_profile_for_user(
     port = inbound.get("port")
     if not isinstance(port, int):
         raise ServiceError("Не удалось определить port во входящем (inbound) в XUI.")
+    reality_params = xui.extract_reality_params_from_inbound(inbound)
 
     # If already exists in DB - rebuild URL.
     if user.vless_uuid and user.vless_remark:
@@ -181,11 +186,14 @@ async def ensure_vless_profile_for_user(
             host=settings.XUI_HOST,
             port=port,
             remark=user.vless_remark,
+            sni=reality_params.get("sni"),
+            sid=reality_params.get("sid"),
+            spider_x=reality_params.get("spider_x"),
         )
 
     vless_uuid = str(uuid.uuid4())
     vless_email = user.vless_email or f"user-{user.telegram_id}"
-    vless_remark = user.vless_remark or f"tg-{user.telegram_id}"
+    vless_remark = user.vless_remark or f"AccessGranted-user-{user.telegram_id}"
     client_settings = {
         "id": vless_uuid,
         "email": vless_email,
@@ -215,6 +223,9 @@ async def ensure_vless_profile_for_user(
         host=settings.XUI_HOST,
         port=port,
         remark=vless_remark,
+        sni=reality_params.get("sni"),
+        sid=reality_params.get("sid"),
+        spider_x=reality_params.get("spider_x"),
     )
 
 

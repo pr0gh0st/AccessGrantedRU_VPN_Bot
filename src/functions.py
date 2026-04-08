@@ -418,21 +418,60 @@ class XUIAPI:
         host: str,
         port: int,
         remark: Optional[str] = None,
-        include_fragment: bool = False,
+        include_fragment: bool = True,
+        sni: Optional[str] = None,
+        sid: Optional[str] = None,
+        spider_x: Optional[str] = None,
     ) -> str:
-        sid = self._normalize_short_id(settings.REALITY_SHORT_ID)
-        spx_encoded = quote(settings.REALITY_SPIDER_X or "/", safe="")
+        sid_value = self._normalize_short_id(sid if sid is not None else settings.REALITY_SHORT_ID)
+        sni_value = (sni or settings.REALITY_SNI).strip()
+        spx_encoded = quote((spider_x if spider_x is not None else settings.REALITY_SPIDER_X) or "/", safe="")
         url = (
             f"vless://{client_id}@{host}:{port}"
             f"?type=tcp&encryption=none&security=reality&pbk={settings.REALITY_PUBLIC_KEY}"
             f"&fp={settings.REALITY_FINGERPRINT}"
-            f"&sni={settings.REALITY_SNI}"
-            f"&sid={sid}"
+            f"&sni={sni_value}"
+            f"&sid={sid_value}"
             f"&spx={spx_encoded}"
         )
         if include_fragment and remark:
             url += f"#{remark}"
         return url
+
+    def extract_reality_params_from_inbound(self, inbound: Mapping[str, Any]) -> Dict[str, str]:
+        """
+        Best-effort extraction of Reality URL params from inbound stream settings.
+        Returns empty dict if fields are unavailable.
+        """
+
+        stream_settings = self._normalize_json_field(inbound.get("streamSettings"))
+        if not isinstance(stream_settings, dict):
+            return {}
+
+        reality = stream_settings.get("realitySettings")
+        if not isinstance(reality, dict):
+            return {}
+
+        sni = ""
+        server_names = reality.get("serverNames")
+        if isinstance(server_names, list) and server_names:
+            sni = str(server_names[0]).strip()
+
+        sid = ""
+        short_ids = reality.get("shortIds")
+        if isinstance(short_ids, list) and short_ids:
+            sid = str(short_ids[0]).strip()
+
+        spider_x = str(reality.get("spiderX", "")).strip()
+
+        data: Dict[str, str] = {}
+        if sni:
+            data["sni"] = sni
+        if sid:
+            data["sid"] = sid
+        if spider_x:
+            data["spider_x"] = spider_x
+        return data
 
     def _normalize_short_id(self, value: str) -> str:
         """
