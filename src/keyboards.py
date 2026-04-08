@@ -64,11 +64,58 @@ def help_inline_kb() -> InlineKeyboardMarkup:
     )
 
 
-def admin_menu_inline_kb() -> InlineKeyboardMarkup:
+def admin_main_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="Пользователи", callback_data="admin:users:0")],
+            [InlineKeyboardButton(text="Найти пользователя", callback_data="admin:search")],
+            [
+                InlineKeyboardButton(text="+ дни", callback_data="admin:add_days"),
+                InlineKeyboardButton(text="− дни", callback_data="admin:sub_days"),
+            ],
+            [InlineKeyboardButton(text="Статистика", callback_data="admin:stats")],
+            [InlineKeyboardButton(text="Рассылка", callback_data="admin:broadcast")],
+            [InlineKeyboardButton(text="Статические профили", callback_data="admin:static")],
+            [InlineKeyboardButton(text="Платежи", callback_data="admin:payments")],
             [InlineKeyboardButton(text="Сбросить trial себе", callback_data="admin:reset_trial_self")],
             [InlineKeyboardButton(text="Назад в меню", callback_data="nav:menu")],
         ]
     )
 
+
+def admin_users_nav_kb(*, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    row: list[InlineKeyboardButton] = []
+    if page > 0:
+        row.append(InlineKeyboardButton(text="←", callback_data=f"admin:users:{page - 1}"))
+    row.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{max(total_pages, 1)}",
+            callback_data="admin:noop",
+        )
+    )
+    if page < total_pages - 1:
+        row.append(InlineKeyboardButton(text="→", callback_data=f"admin:users:{page + 1}"))
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            row,
+            [InlineKeyboardButton(text="Админ-меню", callback_data="admin:menu")],
+        ]
+    )
+
+
+def admin_static_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Список", callback_data="admin:static:list")],
+            [InlineKeyboardButton(text="Добавить", callback_data="admin:static:add")],
+            [InlineKeyboardButton(text="Админ-меню", callback_data="admin:menu")],
+        ]
+    )
+
+
+def admin_cancel_fsm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Отмена", callback_data="admin:cancel_fsm")],
+        ]
+    )

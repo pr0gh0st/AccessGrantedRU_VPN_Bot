@@ -12,8 +12,9 @@ from .config import settings
 from .database import async_session_factory
 from .database import reset_trial_for_user
 from .functions import XUIAPI
+from .admin_handlers import admin_router
 from .keyboards import (
-    admin_menu_inline_kb,
+    admin_main_inline_kb,
     confirm_delete_vpn_inline_kb,
     help_inline_kb,
     main_menu_inline_kb,
@@ -28,6 +29,7 @@ from .services import (
     ensure_vless_profile_for_user,
     fetch_and_update_traffic_for_user,
     get_or_create_user,
+    user_can_activate_trial,
     _is_subscription_active,
 )
 from .utils import format_bytes_gb, format_datetime_ru
@@ -35,6 +37,7 @@ from .utils import format_bytes_gb, format_datetime_ru
 logger = logging.getLogger(__name__)
 
 router = Router(name="bot_router")
+router.include_router(admin_router)
 
 
 def _now_utc() -> dt.datetime:
@@ -113,23 +116,6 @@ async def help_handler(message: Message) -> None:
         "/buy — покупка подписки\n\n"
         "Если возникли вопросы — напишите в поддержку.",
         reply_markup=help_inline_kb(),
-    )
-
-
-@router.message(Command("admin"))
-async def admin_handler(message: Message) -> None:
-    async with async_session_factory() as session:
-        user = await _get_user_for_message(session, message.from_user)
-
-    if not _is_admin_user(user):
-        await message.answer("Доступ запрещен. Команда доступна только администраторам.")
-        return
-
-    await message.answer(
-        "Админ-меню\n"
-        "Доступные действия:\n"
-        "- Сбросить trial себе",
-        reply_markup=admin_menu_inline_kb(),
     )
 
 
@@ -246,13 +232,24 @@ async def admin_reset_trial_self_callback(call: CallbackQuery) -> None:
             await call.answer("Только для админов.", show_alert=True)
             return
 
+        # Remove client in XUI as part of trial reset.
+        if user.vless_uuid:
+            xui = XUIAPI()
+            try:
+                try:
+                    await xui.remove_client(inbound_id=settings.INBOUND_ID, client_id=user.vless_uuid)
+                except Exception:
+                    logger.warning("admin reset trial: failed to remove client from XUI", exc_info=True)
+            finally:
+                await xui.close()
+
         await reset_trial_for_user(session, telegram_id=user.telegram_id)
 
     await call.answer("Готово")
     await call.message.answer(
         "Trial для вашего аккаунта сброшен.\n"
         "Теперь можно снова активировать trial через /start.",
-        reply_markup=admin_menu_inline_kb(),
+        reply_markup=admin_main_inline_kb(),
     )
 
 
@@ -260,6 +257,10 @@ async def admin_reset_trial_self_callback(call: CallbackQuery) -> None:
 async def trial_activate_callback(call: CallbackQuery) -> None:
     async with async_session_factory() as session:
         user = await _get_user_for_message(session, call.from_user)
+
+        if not user_can_activate_trial(user):
+            await call.answer("Пробный период уже был использован.", show_alert=True)
+            return
 
         try:
             xui = XUIAPI()

@@ -288,6 +288,20 @@ async def get_expiring_users(
     return list(result.scalars().all())
 
 
+async def get_expired_active_users(session: AsyncSession, *, limit: int = 200) -> list[User]:
+    now = _utc_now()
+    stmt = (
+        select(User)
+        .where(User.is_active.is_(True))
+        .where(User.subscription_end.is_not(None))
+        .where(User.subscription_end <= now)
+        .order_by(User.subscription_end.asc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
 async def get_admins(session: AsyncSession) -> list[User]:
     stmt = select(User).where(User.is_admin.is_(True)).order_by(User.id.desc())
     result = await session.execute(stmt)
@@ -364,6 +378,141 @@ async def update_traffic_stats(
     user.total_traffic_bytes += traffic
     await session.commit()
     return user
+
+
+async def count_users_total(session: AsyncSession) -> int:
+    r = await session.execute(select(func.count()).select_from(User))
+    return int(r.scalar_one() or 0)
+
+
+async def count_users_with_active_subscription(session: AsyncSession) -> int:
+    now = _utc_now()
+    r = await session.execute(
+        select(func.count())
+        .select_from(User)
+        .where(User.subscription_end.is_not(None))
+        .where(User.subscription_end > now)
+    )
+    return int(r.scalar_one() or 0)
+
+
+async def count_users_trial_used(session: AsyncSession) -> int:
+    r = await session.execute(select(func.count()).select_from(User).where(User.is_trial_used.is_(True)))
+    return int(r.scalar_one() or 0)
+
+
+async def count_users_expired_subscription(session: AsyncSession) -> int:
+    now = _utc_now()
+    r = await session.execute(
+        select(func.count())
+        .select_from(User)
+        .where(User.subscription_end.is_not(None))
+        .where(User.subscription_end <= now)
+    )
+    return int(r.scalar_one() or 0)
+
+
+async def sum_payment_amounts(
+    session: AsyncSession,
+    *,
+    status: Optional[str] = None,
+) -> int:
+    stmt = select(func.coalesce(func.sum(PaymentLog.amount), 0))
+    if status is not None:
+        stmt = stmt.where(PaymentLog.status == status)
+    r = await session.execute(stmt)
+    return int(r.scalar_one() or 0)
+
+
+async def sum_payment_amounts_successful(session: AsyncSession) -> int:
+    """Sum amounts for typical successful payment statuses (Telegram Payments)."""
+
+    ok_statuses = ("success", "completed", "paid", "ok")
+    stmt = select(func.coalesce(func.sum(PaymentLog.amount), 0)).where(PaymentLog.status.in_(ok_statuses))
+    r = await session.execute(stmt)
+    return int(r.scalar_one() or 0)
+
+
+async def get_recent_payment_logs(session: AsyncSession, *, limit: int = 20) -> list[PaymentLog]:
+    stmt = select(PaymentLog).order_by(PaymentLog.id.desc()).limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def save_admin_broadcast_log(
+    session: AsyncSession,
+    *,
+    text: str,
+    total_users: int,
+    success_count: int,
+    fail_count: int,
+) -> AdminBroadcastLog:
+    row = AdminBroadcastLog(
+        text=text,
+        total_users=total_users,
+        success_count=success_count,
+        fail_count=fail_count,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+async def search_user_by_telegram_id(session: AsyncSession, telegram_id: int) -> Optional[User]:
+    return await get_user_by_telegram_id(session, telegram_id)
+
+
+async def search_users_by_username(session: AsyncSession, *, username_query: str, limit: int = 20) -> list[User]:
+    q = username_query.strip().lstrip("@")
+    if not q:
+        return []
+    pattern = f"%{q}%"
+    stmt = (
+        select(User)
+        .where(User.username.is_not(None))
+        .where(User.username.ilike(pattern))
+        .order_by(User.id.desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def extend_subscription_by_days(session: AsyncSession, *, telegram_id: int, days: int) -> User:
+    if days == 0:
+        raise ValueError("days must be non-zero")
+
+    user = await get_user_by_telegram_id(session, telegram_id)
+    if user is None:
+        raise LookupError("User not found")
+
+    now = _utc_now()
+    delta = dt.timedelta(days=abs(days))
+    if days > 0:
+        base = user.subscription_end or now
+        if base <= now:
+            base = now
+        new_end = base + delta
+        if user.subscription_start is None:
+            user.subscription_start = now
+        user.subscription_end = new_end
+        user.is_active = True
+    else:
+        if user.subscription_end is None:
+            raise ValueError("Нет даты окончания подписки — уменьшать нечего")
+        new_end = user.subscription_end - delta
+        user.subscription_end = new_end
+        if new_end <= now:
+            user.is_active = False
+
+    await session.commit()
+    return user
+
+
+async def get_all_telegram_ids(session: AsyncSession) -> list[int]:
+    stmt = select(User.telegram_id)
+    result = await session.execute(stmt)
+    return [int(x) for x in result.scalars().all()]
 
 
 async def reset_trial_for_user(session: AsyncSession, *, telegram_id: int) -> User:

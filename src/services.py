@@ -20,6 +20,7 @@ from .database import (
     update_traffic_stats,
 )
 from .functions import InboundClientTraffic, XUIAPI
+from .utils import format_datetime_ru
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,10 @@ async def activate_trial_and_create_vless_profile(
 ) -> str:
     """
     Activate trial in DB and create the first VLESS client in XUI.
+
+    One trial per Telegram user forever: `is_trial_used` stays True after the first
+    activation (even if subscription expires or XUI client is removed). Only an admin
+    can reset `is_trial_used` via `reset_trial_for_user`.
 
     Returns VLESS URL.
     """
@@ -267,4 +272,21 @@ async def fetch_and_update_traffic_for_user(
     )
 
     return traffic
+
+
+def format_admin_user_card(user: User) -> str:
+    sub_ok = _is_subscription_active(user)
+    uname = f"@{user.username}" if user.username else "—"
+    return (
+        f"ID: `{user.telegram_id}` | {uname}\n"
+        f"Имя: {user.full_name or '—'}\n"
+        f"Trial использован: {'да' if user.is_trial_used else 'нет'}\n"
+        f"Подписка активна: {'да' if sub_ok else 'нет'}\n"
+        f"До: {format_datetime_ru(user.subscription_end)}\n"
+        f"VLESS в БД: {'да' if user.vless_uuid else 'нет'}"
+    )
+
+
+def user_can_activate_trial(user: User) -> bool:
+    return not user.is_trial_used
 
