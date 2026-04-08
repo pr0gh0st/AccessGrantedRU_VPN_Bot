@@ -240,11 +240,9 @@ async def trial_activate_callback(call: CallbackQuery) -> None:
             return
 
     await call.answer()
-    await call.message.answer(
-        "Trial активирован! Ваш VPN доступен.\n\n"
-        f"VLESS ссылка:\n{vless_url}",
-        reply_markup=main_menu_inline_kb(),
-    )
+    await call.message.answer("Trial активирован! Ваш VPN доступен.")
+    await call.message.answer("VLESS ссылка:")
+    await call.message.answer(vless_url, reply_markup=main_menu_inline_kb())
 
 
 @router.callback_query(F.data == "vpn:show")
@@ -279,7 +277,8 @@ async def vpn_show_callback(call: CallbackQuery) -> None:
         return
 
     await call.answer()
-    await call.message.answer(f"Ваша VLESS ссылка:\n{vless_url}", reply_markup=main_menu_inline_kb())
+    await call.message.answer("Ваша VLESS ссылка:")
+    await call.message.answer(vless_url, reply_markup=main_menu_inline_kb())
 
 
 @router.callback_query(F.data == "vpn:create")
@@ -302,7 +301,9 @@ async def vpn_create_callback(call: CallbackQuery) -> None:
             await xui.close()
 
     await call.answer()
-    await call.message.answer(f"Профиль создан. VLESS ссылка:\n{vless_url}", reply_markup=main_menu_inline_kb())
+    await call.message.answer("Профиль создан.")
+    await call.message.answer("VLESS ссылка:")
+    await call.message.answer(vless_url, reply_markup=main_menu_inline_kb())
 
 
 @router.callback_query(F.data == "vpn:delete")

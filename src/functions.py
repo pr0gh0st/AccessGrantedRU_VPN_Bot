@@ -307,17 +307,31 @@ class XUIAPI:
 
         try:
             await self._request("POST", path, json_body=payload_obj_settings)
-            return
         except httpx.HTTPStatusError:
             # Some XUI versions expect `settings` as a JSON-encoded string.
             # If this also fails, we re-raise the original exception context.
-            pass
+            payload_str_settings: Dict[str, Any] = {
+                "id": inbound_id,
+                "settings": json.dumps({"clients": [dict(client)]}, ensure_ascii=False),
+            }
+            await self._request("POST", path, json_body=payload_str_settings)
 
-        payload_str_settings: Dict[str, Any] = {
-            "id": inbound_id,
-            "settings": json.dumps({"clients": [dict(client)]}, ensure_ascii=False),
-        }
-        await self._request("POST", path, json_body=payload_str_settings)
+        # Verify the client really appeared in inbound; some versions return success
+        # but do not persist the client due to payload incompatibilities.
+        client_id = str(client.get("id", "")).strip()
+        client_email = str(client.get("email", "")).strip() or None
+        if client_id and await self._client_exists(inbound_id=inbound_id, client_id=client_id, email=client_email):
+            return
+
+        # Fallback strategy: load current clients and update inbound fully.
+        inbound = await self.get_inbound(inbound_id)
+        current_clients = self._extract_clients_from_inbound(inbound)
+        if not self._contains_client(current_clients, client_id=client_id, email=client_email):
+            current_clients.append(dict(client))
+        await self.update_inbound_clients(inbound_id=inbound_id, clients=current_clients)
+
+        if client_id and not await self._client_exists(inbound_id=inbound_id, client_id=client_id, email=client_email):
+            raise RuntimeError("Client was not found in inbound after add/update fallback")
 
     async def remove_client(self, *, inbound_id: int, client_id: str) -> None:
         """
@@ -402,17 +416,49 @@ class XUIAPI:
         client_id: str,
         host: str,
         port: int,
-        remark: str,
+        remark: Optional[str] = None,
+        include_fragment: bool = False,
     ) -> str:
-        return (
+        url = (
             f"vless://{client_id}@{host}:{port}"
             f"?type=tcp&security=reality&pbk={settings.REALITY_PUBLIC_KEY}"
             f"&fp={settings.REALITY_FINGERPRINT}"
             f"&sni={settings.REALITY_SNI}"
             f"&sid={settings.REALITY_SHORT_ID}"
             f"&spx={settings.REALITY_SPIDER_X}"
-            f"#{remark}"
         )
+        if include_fragment and remark:
+            url += f"#{remark}"
+        return url
+
+    async def _client_exists(self, *, inbound_id: int, client_id: str, email: Optional[str]) -> bool:
+        inbound = await self.get_inbound(inbound_id)
+        clients = self._extract_clients_from_inbound(inbound)
+        return self._contains_client(clients, client_id=client_id, email=email)
+
+    def _contains_client(self, clients: List[Dict[str, Any]], *, client_id: str, email: Optional[str]) -> bool:
+        for c in clients:
+            cid = str(c.get("id", "")).strip()
+            cem = str(c.get("email", "")).strip()
+            if client_id and cid == client_id:
+                return True
+            if email and cem == email:
+                return True
+        return False
+
+    def _extract_clients_from_inbound(self, inbound: Dict[str, Any]) -> List[Dict[str, Any]]:
+        settings_field = inbound.get("settings")
+        settings_data = self._normalize_json_field(settings_field)
+        if not isinstance(settings_data, dict):
+            return []
+        clients = settings_data.get("clients", [])
+        if not isinstance(clients, list):
+            return []
+        result: List[Dict[str, Any]] = []
+        for c in clients:
+            if isinstance(c, dict):
+                result.append(dict(c))
+        return result
 
     def _parse_traffic_from_any(
         self,
