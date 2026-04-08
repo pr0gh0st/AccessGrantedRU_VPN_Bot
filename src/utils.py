@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import Optional
+from zoneinfo import ZoneInfo
+
+_MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
 
 def format_bytes_gb(value_bytes: int) -> str:
@@ -20,10 +23,9 @@ def format_datetime_ru(value: Optional[dt.datetime]) -> str:
     if value is None:
         return "не задано"
     if value.tzinfo is None:
-        # Assume UTC if timezone-less.
         value = value.replace(tzinfo=dt.timezone.utc)
-    # Keep UTC to be deterministic.
-    return value.strftime("%Y-%m-%d %H:%M UTC")
+    local = value.astimezone(_MOSCOW_TZ)
+    return local.strftime("%Y-%m-%d %H:%M МСК")
 
 
 def truncate_payload(text: str, *, max_len: int = 512) -> str:
