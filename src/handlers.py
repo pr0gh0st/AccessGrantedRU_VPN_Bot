@@ -13,7 +13,7 @@ from .database import async_session_factory
 from .database import reset_trial_for_user
 from .functions import XUIAPI
 from .admin_handlers import admin_router
-from .client_guide import GUIDE_TEXT_BY_PLATFORM, RU_ROUTING_HAPP_IMPORT
+from .client_guide import GUIDE_PART1_BY_PLATFORM, routing_message_html
 from .keyboards import (
     admin_main_inline_kb,
     confirm_delete_vpn_inline_kb,
@@ -306,12 +306,12 @@ async def guide_platform_callback(call: CallbackQuery) -> None:
     assert call.data is not None
     key = call.data.split(":", 1)[1]
     await call.answer()
-    fn = GUIDE_TEXT_BY_PLATFORM.get(key)
+    fn = GUIDE_PART1_BY_PLATFORM.get(key)
     if fn is None:
         await call.message.answer("Неизвестная платформа.")
         return
     await call.message.answer(fn())
-    await call.message.answer(RU_ROUTING_HAPP_IMPORT)
+    await call.message.answer(routing_message_html(), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "vpn:show")
