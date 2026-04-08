@@ -107,18 +107,33 @@ class XUIAPI:
 
         try:
             for candidate in self._login_path_candidates:
-                r = await self._client.post(
-                    candidate,
-                    json={"username": self._username, "password": self._password},
-                )
+                # Attempt JSON login (as per upstream docs).
+                r = await self._client.post(candidate, json={"username": self._username, "password": self._password})
                 last_status = r.status_code
-                # Successful auth usually returns 200 with JSON (or sometimes empty body)
-                if r.status_code == 200:
+
+                if r.status_code in (200, 204):
+                    # Some setups return 200 with HTML, but still set cookies.
+                    if len(self._client.cookies.jar) > 0:
+                        self._login_path = candidate
+                        self._is_logged_in = True
+                        await self._probe_api_root()
+                        return
+
+                # Fallback: some panels expect form-encoded login.
+                r2 = await self._client.post(
+                    candidate,
+                    data={"username": self._username, "password": self._password},
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                last_status = r2.status_code
+                if r2.status_code in (200, 204) and len(self._client.cookies.jar) > 0:
                     self._login_path = candidate
                     self._is_logged_in = True
+                    await self._probe_api_root()
                     return
+
                 # keep small snippet for troubleshooting (no secrets)
-                last_text = (r.text or "")[:200]
+                last_text = ((r2.text or r.text) or "")[:200]
 
             raise RuntimeError(f"XUI login failed, last status={last_status}, body_snippet={last_text!r}")
         except httpx.HTTPError as e:
@@ -126,6 +141,39 @@ class XUIAPI:
         except Exception:
             # Avoid logging credentials.
             raise
+
+    async def _probe_api_root(self) -> None:
+        """
+        Try to find the actual API root for the current deployment.
+
+        Some reverse proxies mask unauthorized requests as 404.
+        We probe a cheap endpoint under each candidate and pick the first that is not 404.
+        """
+
+        # These endpoints exist in upstream docs; if they differ in your version,
+        # adjust only here.
+        probe_paths = [
+            "/server/status",
+            "/inbounds/list",
+        ]
+
+        for root in self._api_root_candidates:
+            for probe in probe_paths:
+                try_path = f"{root}{probe}"
+                try:
+                    r = await self._client.get(try_path)
+                except httpx.HTTPError:
+                    continue
+
+                # We accept anything except 404 as a sign that the path exists
+                # (could still be 401/403 depending on auth).
+                if r.status_code != 404:
+                    self._api_root = root
+                    logger.info("XUI API root detected: %s", self._api_root)
+                    return
+
+        # If everything is 404, keep current root and let the next request surface the error.
+        logger.warning("XUI API root probe failed; keeping %s", self._api_root)
 
     def _normalize_json_field(self, value: Any) -> Any:
         """If value looks like JSON string - parse it; otherwise return as-is."""
