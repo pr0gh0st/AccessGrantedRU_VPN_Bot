@@ -64,6 +64,24 @@ def help_inline_kb() -> InlineKeyboardMarkup:
     )
 
 
+def vless_connection_help_kb() -> InlineKeyboardMarkup:
+    """Кнопки выбора ОС после выдачи VLESS-ссылки."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="1. Windows", callback_data="guide:win"),
+                InlineKeyboardButton(text="2. Linux", callback_data="guide:linux"),
+            ],
+            [
+                InlineKeyboardButton(text="3. Mac", callback_data="guide:mac"),
+                InlineKeyboardButton(text="4. iOS", callback_data="guide:ios"),
+            ],
+            [InlineKeyboardButton(text="5. Android", callback_data="guide:android")],
+            [InlineKeyboardButton(text="Главное меню", callback_data="nav:menu")],
+        ]
+    )
+
+
 def admin_main_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

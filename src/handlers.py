@@ -13,6 +13,7 @@ from .database import async_session_factory
 from .database import reset_trial_for_user
 from .functions import XUIAPI
 from .admin_handlers import admin_router
+from .client_guide import GUIDE_TEXT_BY_PLATFORM, RU_ROUTING_HAPP_IMPORT
 from .keyboards import (
     admin_main_inline_kb,
     confirm_delete_vpn_inline_kb,
@@ -21,6 +22,7 @@ from .keyboards import (
     profile_inline_kb,
     trial_inline_kb,
     vpn_inline_kb,
+    vless_connection_help_kb,
 )
 from .services import (
     ServiceError,
@@ -76,6 +78,14 @@ async def _get_user_for_message(session, tg_user) -> Any:
 
 def _is_admin_user(user: Any) -> bool:
     return bool(user.is_admin or (user.telegram_id in settings.admin_ids))
+
+
+async def _send_vless_connection_help(message: Message) -> None:
+    await message.answer(
+        "Теперь Вы можете скопировать ссылку в Ваше приложение\n\n"
+        "Выберите платформу для инструкции:",
+        reply_markup=vless_connection_help_kb(),
+    )
 
 
 async def _with_xui():
@@ -284,7 +294,21 @@ async def trial_activate_callback(call: CallbackQuery) -> None:
     await call.answer()
     await call.message.answer("Trial активирован! Ваш VPN доступен.")
     await call.message.answer("VLESS ссылка:")
-    await call.message.answer(vless_url, reply_markup=main_menu_inline_kb())
+    await call.message.answer(vless_url)
+    await _send_vless_connection_help(call.message)
+
+
+@router.callback_query(F.data.startswith("guide:"))
+async def guide_platform_callback(call: CallbackQuery) -> None:
+    assert call.data is not None
+    key = call.data.split(":", 1)[1]
+    await call.answer()
+    fn = GUIDE_TEXT_BY_PLATFORM.get(key)
+    if fn is None:
+        await call.message.answer("Неизвестная платформа.")
+        return
+    await call.message.answer(fn())
+    await call.message.answer(RU_ROUTING_HAPP_IMPORT)
 
 
 @router.callback_query(F.data == "vpn:show")
@@ -320,7 +344,8 @@ async def vpn_show_callback(call: CallbackQuery) -> None:
 
     await call.answer()
     await call.message.answer("Ваша VLESS ссылка:")
-    await call.message.answer(vless_url, reply_markup=main_menu_inline_kb())
+    await call.message.answer(vless_url)
+    await _send_vless_connection_help(call.message)
 
 
 @router.callback_query(F.data == "vpn:create")
@@ -345,7 +370,8 @@ async def vpn_create_callback(call: CallbackQuery) -> None:
     await call.answer()
     await call.message.answer("Профиль создан.")
     await call.message.answer("VLESS ссылка:")
-    await call.message.answer(vless_url, reply_markup=main_menu_inline_kb())
+    await call.message.answer(vless_url)
+    await _send_vless_connection_help(call.message)
 
 
 @router.callback_query(F.data == "vpn:delete")

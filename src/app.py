@@ -1,14 +1,68 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramAPIError
 
 from .config import settings
-from .database import init_db
+from .database import async_session_factory, get_expired_active_users, init_db
+from .functions import XUIAPI
 from .handlers import router
+
+logger = logging.getLogger(__name__)
+
+
+async def _expired_subscriptions_worker(bot: Bot) -> None:
+    """
+    Hourly background task:
+    - find expired active users
+    - remove VLESS client from XUI
+    - deactivate user in DB
+    - notify user
+    """
+
+    while True:
+        try:
+            async with async_session_factory() as session:
+                expired_users = await get_expired_active_users(session, limit=500)
+
+                if expired_users:
+                    xui = XUIAPI()
+                    try:
+                        for user in expired_users:
+                            if user.vless_uuid:
+                                try:
+                                    await xui.remove_client(inbound_id=settings.INBOUND_ID, client_id=user.vless_uuid)
+                                except Exception:
+                                    logger.warning("Failed to remove expired user client in XUI tg_id=%s", user.telegram_id)
+
+                            user.is_active = False
+                            user.vless_uuid = None
+                            user.vless_email = None
+                            user.vless_remark = None
+                            user.vless_profile_data = None
+                            await session.commit()
+
+                            try:
+                                await bot.send_message(
+                                    chat_id=user.telegram_id,
+                                    text=(
+                                        "Срок вашей подписки истёк.\n"
+                                        "VPN-профиль отключён. Чтобы продолжить пользоваться сервисом, продлите подписку."
+                                    ),
+                                )
+                            except TelegramAPIError:
+                                logger.info("Cannot notify expired user tg_id=%s", user.telegram_id)
+                    finally:
+                        await xui.close()
+        except Exception:
+            logger.exception("Expired subscriptions worker iteration failed")
+
+        await asyncio.sleep(3600)
 
 
 async def main() -> None:
@@ -26,7 +80,13 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
-    await dp.start_polling(bot)
+    worker_task = asyncio.create_task(_expired_subscriptions_worker(bot))
+    try:
+        await dp.start_polling(bot)
+    finally:
+        worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker_task
 
 
 if __name__ == "__main__":
