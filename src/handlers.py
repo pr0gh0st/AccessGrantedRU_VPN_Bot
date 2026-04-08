@@ -59,11 +59,10 @@ def _profile_status_text(user: Any) -> str:
 
 def _myvpn_status_text(user: Any) -> str:
     subscription_active = _is_subscription_active(user)
-    has_vless = bool(user.vless_uuid and user.vless_remark)
     return (
         "Мой VPN\n"
         f"Подписка активна: {'да' if subscription_active else 'нет'}\n"
-        f"VLESS профиль: {'есть' if has_vless else 'нет'}"
+        f"Окончание подписки: {format_datetime_ru(user.subscription_end)}"
     )
 
 
