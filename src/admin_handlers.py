@@ -15,6 +15,7 @@ from .config import settings
 from .database import (
     add_static_profile,
     async_session_factory,
+    count_user_vless_keys,
     count_users_expired_subscription,
     count_users_trial_used,
     count_users_total,
@@ -165,13 +166,19 @@ async def msg_admin_search(message: Message, state: FSMContext) -> None:
             if not u:
                 await message.answer("Пользователь не найден.", reply_markup=admin_main_inline_kb())
                 return
-            await message.answer(format_admin_user_card(u), reply_markup=admin_main_inline_kb())
+            kc = await count_user_vless_keys(session, user_id=u.id)
+            await message.answer(
+                format_admin_user_card(u, vless_keys_count=kc), reply_markup=admin_main_inline_kb()
+            )
             return
         found = await search_users_by_username(session, username_query=q, limit=8)
         if not found:
             await message.answer("Никого не найдено.", reply_markup=admin_main_inline_kb())
             return
-        parts = [format_admin_user_card(u) for u in found]
+        parts = []
+        for u in found:
+            kc = await count_user_vless_keys(session, user_id=u.id)
+            parts.append(format_admin_user_card(u, vless_keys_count=kc))
         text = "\n\n---\n\n".join(parts)
         if len(text) > 3800:
             text = text[:3800] + "\n…(обрезано)"

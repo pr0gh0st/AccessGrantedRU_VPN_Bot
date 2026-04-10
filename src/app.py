@@ -8,9 +8,16 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramAPIError
+from sqlalchemy import delete
 
 from .config import settings
-from .database import async_session_factory, get_expired_active_users, init_db
+from .database import (
+    UserVlessKey,
+    async_session_factory,
+    get_expired_active_users,
+    init_db,
+    list_user_vless_keys,
+)
 from .functions import XUIAPI
 from .handlers import router
 from .reminders import run_subscription_reminder_tick
@@ -36,12 +43,19 @@ async def _expired_subscriptions_worker(bot: Bot) -> None:
                     xui = XUIAPI()
                     try:
                         for user in expired_users:
-                            if user.vless_uuid:
+                            keys = await list_user_vless_keys(session, user_id=user.id)
+                            for k in keys:
                                 try:
-                                    await xui.remove_client(inbound_id=settings.INBOUND_ID, client_id=user.vless_uuid)
+                                    await xui.remove_client(
+                                        inbound_id=settings.INBOUND_ID, client_id=k.vless_uuid
+                                    )
                                 except Exception:
-                                    logger.warning("Failed to remove expired user client in XUI tg_id=%s", user.telegram_id)
+                                    logger.warning(
+                                        "Failed to remove expired user client in XUI tg_id=%s",
+                                        user.telegram_id,
+                                    )
 
+                            await session.execute(delete(UserVlessKey).where(UserVlessKey.user_id == user.id))
                             user.is_active = False
                             user.vless_uuid = None
                             user.vless_email = None
@@ -54,7 +68,7 @@ async def _expired_subscriptions_worker(bot: Bot) -> None:
                                     chat_id=user.telegram_id,
                                     text=(
                                         "Срок вашей подписки истёк.\n"
-                                        "VPN-профиль отключён. Чтобы продолжить пользоваться сервисом, продлите подписку."
+                                        "VPN-ключи отключены. Чтобы продолжить пользоваться сервисом, продлите подписку."
                                     ),
                                 )
                             except TelegramAPIError:

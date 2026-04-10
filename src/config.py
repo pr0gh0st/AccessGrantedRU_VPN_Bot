@@ -47,6 +47,10 @@ class Settings(BaseSettings):
 
     # Subscription policy
     TRIAL_DAYS: int = Field(default=0)
+    # Максимум одновременных VLESS-ключей на одного пользователя
+    MAX_VLESS_KEYS: int = Field(default=5)
+    # Цена дополнительного ключа (минорные единицы валюты, как у остальных PRICE_*)
+    PRICE_EXTRA_VLESS_KEY: int = Field(default=0)
 
     # Telegram Payments prices (minor currency units, e.g. cents)
     PRICE_1_MONTH: int = Field(default=0)
@@ -103,12 +107,18 @@ class Settings(BaseSettings):
         if missing:
             raise RuntimeError(f"Не заполнены обязательные переменные окружения: {', '.join(missing)}")
 
-        required_int_fields = ["INBOUND_ID", "TRIAL_DAYS"]
+        required_int_fields = ["INBOUND_ID", "TRIAL_DAYS", "MAX_VLESS_KEYS"]
         for name in required_int_fields:
             if getattr(self, name) <= 0:
                 raise RuntimeError(f"Переменная окружения `{name}` должна быть > 0")
 
-        required_price_fields = ["PRICE_1_MONTH", "PRICE_3_MONTHS", "PRICE_6_MONTHS", "PRICE_12_MONTHS"]
+        required_price_fields = [
+            "PRICE_1_MONTH",
+            "PRICE_3_MONTHS",
+            "PRICE_6_MONTHS",
+            "PRICE_12_MONTHS",
+            "PRICE_EXTRA_VLESS_KEY",
+        ]
         for name in required_price_fields:
             if getattr(self, name) <= 0:
                 raise RuntimeError(f"Переменная окружения `{name}` должна быть > 0")

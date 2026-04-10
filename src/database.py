@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text, func, select, text, update
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    delete,
+    func,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -77,6 +91,22 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
 
+class UserVlessKey(Base):
+    """Отдельный VLESS-клиент (ключ) пользователя в 3X-UI."""
+
+    __tablename__ = "user_vless_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    vless_uuid: Mapped[str] = mapped_column(String(64), nullable=False)
+    vless_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    vless_remark: Mapped[str] = mapped_column(String(255), nullable=False)
+    vless_profile_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class StaticProfile(Base):
     __tablename__ = "static_profiles"
 
@@ -138,12 +168,35 @@ async def _sqlite_add_user_reminder_columns(conn) -> None:
         )
 
 
+async def _migrate_legacy_vless_into_keys(conn) -> None:
+    """Перенос единственного профиля из users.* в user_vless_keys (однократно)."""
+
+    try:
+        await conn.execute(
+            text(
+                """
+                INSERT INTO user_vless_keys (user_id, vless_uuid, vless_email, vless_remark, vless_profile_data)
+                SELECT u.id, u.vless_uuid, u.vless_email, u.vless_remark,
+                       COALESCE(u.vless_profile_data, '{}')
+                FROM users u
+                WHERE u.vless_uuid IS NOT NULL AND TRIM(u.vless_uuid) != ''
+                  AND NOT EXISTS (SELECT 1 FROM user_vless_keys k WHERE k.user_id = u.id)
+                """
+            )
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "migrate legacy vless keys skipped or failed", exc_info=True
+        )
+
+
 async def init_db() -> None:
     """Create DB tables if they do not exist."""
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _sqlite_add_user_reminder_columns(conn)
+        await _migrate_legacy_vless_into_keys(conn)
 
 
 async def create_user_if_not_exists(
@@ -241,26 +294,87 @@ async def deactivate_expired_users(session: AsyncSession) -> int:
     return int(result.rowcount or 0)
 
 
-async def save_vless_profile(
+async def list_user_vless_keys(session: AsyncSession, *, user_id: int) -> list[UserVlessKey]:
+    stmt = select(UserVlessKey).where(UserVlessKey.user_id == user_id).order_by(UserVlessKey.id.asc())
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def count_user_vless_keys(session: AsyncSession, *, user_id: int) -> int:
+    stmt = select(func.count()).select_from(UserVlessKey).where(UserVlessKey.user_id == user_id)
+    result = await session.execute(stmt)
+    return int(result.scalar_one() or 0)
+
+
+async def get_user_vless_key_owned(
+    session: AsyncSession, *, key_id: int, telegram_id: int
+) -> Optional[UserVlessKey]:
+    stmt = (
+        select(UserVlessKey)
+        .join(User, User.id == UserVlessKey.user_id)
+        .where(User.telegram_id == telegram_id)
+        .where(UserVlessKey.id == key_id)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def add_user_vless_key(
     session: AsyncSession,
     *,
-    telegram_id: int,
+    user_id: int,
     vless_uuid: str,
     vless_email: str,
     vless_remark: str,
     vless_profile_data: str,
-) -> User:
-    user = await get_user_by_telegram_id(session, telegram_id)
-    if user is None:
-        raise LookupError("User not found")
-
-    user.vless_uuid = vless_uuid
-    user.vless_email = vless_email
-    user.vless_remark = vless_remark
-    user.vless_profile_data = vless_profile_data
-    user.is_active = True
+) -> UserVlessKey:
+    row = UserVlessKey(
+        user_id=user_id,
+        vless_uuid=vless_uuid,
+        vless_email=vless_email,
+        vless_remark=vless_remark,
+        vless_profile_data=vless_profile_data,
+    )
+    session.add(row)
     await session.commit()
-    return user
+    await sync_user_legacy_vless_from_keys(session, user_id=user_id)
+    return row
+
+
+async def delete_owned_user_vless_key(
+    session: AsyncSession, *, key_id: int, telegram_id: int
+) -> Optional[UserVlessKey]:
+    row = await get_user_vless_key_owned(session, key_id=key_id, telegram_id=telegram_id)
+    if row is None:
+        return None
+    uid = row.user_id
+    await session.execute(delete(UserVlessKey).where(UserVlessKey.id == key_id))
+    await session.commit()
+    await sync_user_legacy_vless_from_keys(session, user_id=uid)
+    return row
+
+
+async def sync_user_legacy_vless_from_keys(session: AsyncSession, *, user_id: int) -> None:
+    """Дублирует первый ключ в users.* для совместимости со старым кодом / отчётами."""
+
+    result = await session.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        return
+
+    keys = await list_user_vless_keys(session, user_id=user_id)
+    if keys:
+        k = keys[0]
+        user.vless_uuid = k.vless_uuid
+        user.vless_email = k.vless_email
+        user.vless_remark = k.vless_remark
+        user.vless_profile_data = k.vless_profile_data
+    else:
+        user.vless_uuid = None
+        user.vless_email = None
+        user.vless_remark = None
+        user.vless_profile_data = None
+    await session.commit()
 
 
 async def remove_vless_profile(session: AsyncSession, *, telegram_id: int) -> User:
@@ -268,13 +382,21 @@ async def remove_vless_profile(session: AsyncSession, *, telegram_id: int) -> Us
     if user is None:
         raise LookupError("User not found")
 
+    await session.execute(delete(UserVlessKey).where(UserVlessKey.user_id == user.id))
     user.vless_uuid = None
     user.vless_email = None
     user.vless_remark = None
     user.vless_profile_data = None
-    # Keep subscription fields intact; only remove the client/profile mapping.
     await session.commit()
     return user
+
+
+async def payment_log_exists_by_telegram_charge(session: AsyncSession, *, charge_id: str) -> bool:
+    if not charge_id:
+        return False
+    stmt = select(PaymentLog.id).where(PaymentLog.telegram_payment_charge_id == charge_id).limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
 
 
 async def get_all_users(session: AsyncSession, *, offset: int = 0, limit: int = 50) -> list[User]:
@@ -572,6 +694,8 @@ async def reset_trial_for_user(session: AsyncSession, *, telegram_id: int) -> Us
     user = await get_user_by_telegram_id(session, telegram_id)
     if user is None:
         raise LookupError("User not found")
+
+    await session.execute(delete(UserVlessKey).where(UserVlessKey.user_id == user.id))
 
     user.is_trial_used = False
     # Reset trial-linked subscription state and profile mapping.

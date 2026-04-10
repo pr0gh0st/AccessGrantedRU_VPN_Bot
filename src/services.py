@@ -11,12 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .config import settings
 from .database import (
     User,
-    create_user_if_not_exists,
-    get_user_by_telegram_id,
     activate_trial,
-    save_vless_profile,
+    add_user_vless_key,
+    count_user_vless_keys,
+    create_user_if_not_exists,
+    delete_owned_user_vless_key,
+    get_user_vless_key_owned,
+    list_user_vless_keys,
     remove_vless_profile,
-    extend_subscription,
     update_traffic_stats,
 )
 from .functions import InboundClientTraffic, XUIAPI
@@ -79,6 +81,25 @@ async def get_or_create_user(
     )
 
 
+def _build_vless_url_for_key(
+    *,
+    xui: XUIAPI,
+    vless_uuid: str,
+    vless_remark: str,
+    port: int,
+    reality_params: dict,
+) -> str:
+    return xui.build_vless_url(
+        client_id=vless_uuid,
+        host=settings.XUI_HOST,
+        port=port,
+        remark=vless_remark,
+        sni=reality_params.get("sni"),
+        sid=reality_params.get("sid"),
+        spider_x=reality_params.get("spider_x"),
+    )
+
+
 async def activate_trial_and_create_vless_profile(
     *,
     session: AsyncSession,
@@ -98,19 +119,16 @@ async def activate_trial_and_create_vless_profile(
     if user.is_trial_used:
         raise ServiceError("Trial уже использован.")
 
-    # Prepare stable identifiers used in VLESS URL and DB.
     vless_uuid = str(uuid.uuid4())
     vless_email = f"user-{user.telegram_id}"
-    vless_remark = f"AccessGranted-user-{user.telegram_id}"
+    vless_remark = f"AccessGranted-user-{user.telegram_id}-k1"
 
-    # Get inbound details (port), needed for VLESS URL.
     inbound = await xui.get_inbound(settings.INBOUND_ID)
     port = inbound.get("port")
     if not isinstance(port, int):
         raise ServiceError("Не удалось определить port во входящем (inbound) в XUI.")
     reality_params = xui.extract_reality_params_from_inbound(inbound)
 
-    # 1) Mark trial as used in DB (prevents double-spend).
     try:
         user = await activate_trial(session, telegram_id=user.telegram_id, trial_days=settings.TRIAL_DAYS)
     except Exception as e:
@@ -118,9 +136,7 @@ async def activate_trial_and_create_vless_profile(
 
     expiry_ms = _to_xui_expiry_ms(user.subscription_end)
     client_settings = {
-        # For VLESS/VMESS: `client.id` is UUID.
         "id": vless_uuid,
-        # For XUI API compatibility: `email` is often present in responses/payloads.
         "email": vless_email,
         "enable": True,
         "expiryTime": expiry_ms,
@@ -131,11 +147,9 @@ async def activate_trial_and_create_vless_profile(
         "flow": "",
     }
 
-    # 2) Create the client in XUI. If this fails - rollback DB trial state.
     try:
         await xui.add_client(inbound_id=settings.INBOUND_ID, client=client_settings)
     except Exception as e:
-        # Best-effort cleanup in XUI.
         try:
             await xui.remove_client(inbound_id=settings.INBOUND_ID, client_id=vless_uuid)
         except Exception:
@@ -153,21 +167,19 @@ async def activate_trial_and_create_vless_profile(
 
         raise ServiceError(f"Не удалось создать VLESS профиль в XUI: {e}") from e
 
-    vless_url = xui.build_vless_url(
-        client_id=vless_uuid,
-        host=settings.XUI_HOST,
+    vless_url = _build_vless_url_for_key(
+        xui=xui,
+        vless_uuid=vless_uuid,
+        vless_remark=vless_remark,
         port=port,
-        remark=vless_remark,
-        sni=reality_params.get("sni"),
-        sid=reality_params.get("sid"),
-        spider_x=reality_params.get("spider_x"),
+        reality_params=reality_params,
     )
 
     vless_profile_data = json.dumps(client_settings, ensure_ascii=False)
     try:
-        await save_vless_profile(
+        await add_user_vless_key(
             session,
-            telegram_id=user.telegram_id,
+            user_id=user.id,
             vless_uuid=vless_uuid,
             vless_email=vless_email,
             vless_remark=vless_remark,
@@ -185,8 +197,26 @@ async def ensure_vless_profile_for_user(
     user: User,
     xui: XUIAPI,
 ) -> str:
+    """Первый бесплатный ключ при активной подписке, если ключей ещё нет."""
+
     if not _is_subscription_active(user):
         raise ServiceError("Подписка не активна — создать профиль нельзя.")
+
+    keys = await list_user_vless_keys(session, user_id=user.id)
+    if keys:
+        inbound = await xui.get_inbound(settings.INBOUND_ID)
+        port = inbound.get("port")
+        if not isinstance(port, int):
+            raise ServiceError("Не удалось определить port во входящем (inbound) в XUI.")
+        reality_params = xui.extract_reality_params_from_inbound(inbound)
+        k = keys[0]
+        return _build_vless_url_for_key(
+            xui=xui,
+            vless_uuid=k.vless_uuid,
+            vless_remark=k.vless_remark,
+            port=port,
+            reality_params=reality_params,
+        )
 
     inbound = await xui.get_inbound(settings.INBOUND_ID)
     port = inbound.get("port")
@@ -194,21 +224,10 @@ async def ensure_vless_profile_for_user(
         raise ServiceError("Не удалось определить port во входящем (inbound) в XUI.")
     reality_params = xui.extract_reality_params_from_inbound(inbound)
 
-    # If already exists in DB - rebuild URL.
-    if user.vless_uuid and user.vless_remark:
-        return xui.build_vless_url(
-            client_id=user.vless_uuid,
-            host=settings.XUI_HOST,
-            port=port,
-            remark=user.vless_remark,
-            sni=reality_params.get("sni"),
-            sid=reality_params.get("sid"),
-            spider_x=reality_params.get("spider_x"),
-        )
-
     vless_uuid = str(uuid.uuid4())
-    vless_email = user.vless_email or f"user-{user.telegram_id}"
-    vless_remark = user.vless_remark or f"AccessGranted-user-{user.telegram_id}"
+    n = 1
+    vless_email = f"user-{user.telegram_id}-k{n}"
+    vless_remark = f"AccessGranted-user-{user.telegram_id}-k{n}"
     client_settings = {
         "id": vless_uuid,
         "email": vless_email,
@@ -224,23 +243,78 @@ async def ensure_vless_profile_for_user(
     await xui.add_client(inbound_id=settings.INBOUND_ID, client=client_settings)
 
     vless_profile_data = json.dumps(client_settings, ensure_ascii=False)
-    await save_vless_profile(
+    await add_user_vless_key(
         session,
-        telegram_id=user.telegram_id,
+        user_id=user.id,
         vless_uuid=vless_uuid,
         vless_email=vless_email,
         vless_remark=vless_remark,
         vless_profile_data=vless_profile_data,
     )
 
-    return xui.build_vless_url(
-        client_id=vless_uuid,
-        host=settings.XUI_HOST,
+    return _build_vless_url_for_key(
+        xui=xui,
+        vless_uuid=vless_uuid,
+        vless_remark=vless_remark,
         port=port,
-        remark=vless_remark,
-        sni=reality_params.get("sni"),
-        sid=reality_params.get("sid"),
-        spider_x=reality_params.get("spider_x"),
+        reality_params=reality_params,
+    )
+
+
+async def create_extra_vless_key_after_payment(
+    *,
+    session: AsyncSession,
+    user: User,
+    xui: XUIAPI,
+) -> str:
+    """Дополнительный ключ (оплата)."""
+
+    if not _is_subscription_active(user):
+        raise ServiceError("Подписка не активна.")
+
+    n_existing = await count_user_vless_keys(session, user_id=user.id)
+    if n_existing >= settings.MAX_VLESS_KEYS:
+        raise ServiceError(f"Достигнут лимит ключей ({settings.MAX_VLESS_KEYS}).")
+
+    inbound = await xui.get_inbound(settings.INBOUND_ID)
+    port = inbound.get("port")
+    if not isinstance(port, int):
+        raise ServiceError("Не удалось определить port во входящем (inbound) в XUI.")
+    reality_params = xui.extract_reality_params_from_inbound(inbound)
+
+    n = n_existing + 1
+    vless_uuid = str(uuid.uuid4())
+    vless_email = f"user-{user.telegram_id}-k{n}"
+    vless_remark = f"AccessGranted-user-{user.telegram_id}-k{n}"
+    client_settings = {
+        "id": vless_uuid,
+        "email": vless_email,
+        "enable": True,
+        "expiryTime": _to_xui_expiry_ms(user.subscription_end),
+        "totalGB": 0,
+        "limitIp": 0,
+        "tgId": "",
+        "subId": "",
+        "flow": "",
+    }
+
+    await xui.add_client(inbound_id=settings.INBOUND_ID, client=client_settings)
+    vless_profile_data = json.dumps(client_settings, ensure_ascii=False)
+    await add_user_vless_key(
+        session,
+        user_id=user.id,
+        vless_uuid=vless_uuid,
+        vless_email=vless_email,
+        vless_remark=vless_remark,
+        vless_profile_data=vless_profile_data,
+    )
+
+    return _build_vless_url_for_key(
+        xui=xui,
+        vless_uuid=vless_uuid,
+        vless_remark=vless_remark,
+        port=port,
+        reality_params=reality_params,
     )
 
 
@@ -250,11 +324,32 @@ async def delete_vless_profile_for_user(
     user: User,
     xui: XUIAPI,
 ) -> None:
-    if not user.vless_uuid:
-        raise ServiceError("У вас нет сохранённого VLESS профиля.")
+    keys = await list_user_vless_keys(session, user_id=user.id)
+    if not keys:
+        raise ServiceError("У вас нет сохранённых VLESS ключей.")
 
-    await xui.remove_client(inbound_id=settings.INBOUND_ID, client_id=user.vless_uuid)
+    for k in keys:
+        try:
+            await xui.remove_client(inbound_id=settings.INBOUND_ID, client_id=k.vless_uuid)
+        except Exception:
+            logger.warning("remove_client failed for uuid=%s", k.vless_uuid, exc_info=True)
+
     await remove_vless_profile(session, telegram_id=user.telegram_id)
+
+
+async def delete_single_vless_key_for_user(
+    *,
+    session: AsyncSession,
+    user: User,
+    key_id: int,
+    xui: XUIAPI,
+) -> None:
+    key = await get_user_vless_key_owned(session, key_id=key_id, telegram_id=user.telegram_id)
+    if key is None:
+        raise ServiceError("Ключ не найден.")
+
+    await xui.remove_client(inbound_id=settings.INBOUND_ID, client_id=key.vless_uuid)
+    await delete_owned_user_vless_key(session, key_id=key_id, telegram_id=user.telegram_id)
 
 
 async def fetch_and_update_traffic_for_user(
@@ -263,28 +358,38 @@ async def fetch_and_update_traffic_for_user(
     user: User,
     xui: XUIAPI,
 ) -> InboundClientTraffic:
-    if not user.vless_uuid or not user.vless_email:
-        raise ServiceError("VLESS профиль не найден — создайте его в разделе «Мой VPN».")
+    keys = await list_user_vless_keys(session, user_id=user.id)
+    if not keys:
+        raise ServiceError("VLESS ключи не найдены — создайте их в разделе «Мой VPN».")
 
-    traffic = await xui.get_client_traffic(
-        inbound_id=settings.INBOUND_ID,
-        client_id=user.vless_uuid,
-        email=user.vless_email,
-    )
-    if traffic is None:
-        raise ServiceError("Не удалось получить трафик из XUI.")
+    total_up = 0
+    total_down = 0
+    for k in keys:
+        traffic = await xui.get_client_traffic(
+            inbound_id=settings.INBOUND_ID,
+            client_id=k.vless_uuid,
+            email=k.vless_email,
+        )
+        if traffic is None:
+            raise ServiceError("Не удалось получить трафик из XUI.")
+        total_up += traffic.uploaded_bytes
+        total_down += traffic.downloaded_bytes
 
     await update_traffic_stats(
         session,
         telegram_id=user.telegram_id,
-        uploaded_bytes=traffic.uploaded_bytes,
-        downloaded_bytes=traffic.downloaded_bytes,
+        uploaded_bytes=total_up,
+        downloaded_bytes=total_down,
     )
 
-    return traffic
+    return InboundClientTraffic(
+        uploaded_bytes=total_up,
+        downloaded_bytes=total_down,
+        total_bytes=total_up + total_down,
+    )
 
 
-def format_admin_user_card(user: User) -> str:
+def format_admin_user_card(user: User, *, vless_keys_count: int = 0) -> str:
     sub_ok = _is_subscription_active(user)
     uname = f"@{user.username}" if user.username else "—"
     return (
@@ -293,10 +398,13 @@ def format_admin_user_card(user: User) -> str:
         f"Trial использован: {'да' if user.is_trial_used else 'нет'}\n"
         f"Подписка активна: {'да' if sub_ok else 'нет'}\n"
         f"До: {format_datetime_ru(user.subscription_end)}\n"
-        f"VLESS в БД: {'да' if user.vless_uuid else 'нет'}"
+        f"VLESS ключей: {vless_keys_count}"
     )
 
 
 def user_can_activate_trial(user: User) -> bool:
     return not user.is_trial_used
 
+
+def user_can_buy_extra_key(*, user: User, keys_count: int) -> bool:
+    return _is_subscription_active(user) and keys_count < settings.MAX_VLESS_KEYS

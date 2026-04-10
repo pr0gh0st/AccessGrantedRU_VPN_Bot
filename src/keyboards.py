@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Sequence
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
@@ -31,27 +33,78 @@ def profile_inline_kb() -> InlineKeyboardMarkup:
     )
 
 
-def vpn_inline_kb(*, has_vless_profile: bool, subscription_active: bool) -> InlineKeyboardMarkup:
+def vpn_keys_inline_kb(
+    *,
+    key_rows: Sequence[tuple[int, int]],
+    subscription_active: bool,
+    can_create_first_free: bool,
+    show_buy_extra: bool,
+    show_delete_all: bool,
+) -> InlineKeyboardMarkup:
+    """key_rows: (key_id, номер для отображения)."""
+
     buttons: list[list[InlineKeyboardButton]] = []
 
     if subscription_active:
-        if has_vless_profile:
-            buttons.append([InlineKeyboardButton(text="Показать ссылку", callback_data="vpn:show")])
-            buttons.append([InlineKeyboardButton(text="Удалить профиль", callback_data="vpn:delete")])
-        else:
-            buttons.append([InlineKeyboardButton(text="Создать VLESS профиль", callback_data="vpn:create")])
+        for key_id, num in key_rows:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"Показать ключ №{num}",
+                        callback_data=f"vpn:show:{key_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text=f"Удалить №{num}",
+                        callback_data=f"vpn:del:{key_id}",
+                    ),
+                ]
+            )
+        if can_create_first_free:
+            buttons.append([InlineKeyboardButton(text="Создать первый ключ", callback_data="vpn:create")])
+        if show_buy_extra:
+            buttons.append([InlineKeyboardButton(text="Купить доп. ключ", callback_data="buy:inv:ek")])
+        if show_delete_all:
+            buttons.append([InlineKeyboardButton(text="Удалить все ключи", callback_data="vpn:delete_all")])
 
     buttons.append([InlineKeyboardButton(text="Назад в меню", callback_data="nav:menu")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def confirm_delete_vpn_inline_kb() -> InlineKeyboardMarkup:
+def confirm_delete_key_kb(*, key_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Да, удалить", callback_data="vpn:confirm_delete_yes"),
-                InlineKeyboardButton(text="Нет", callback_data="vpn:confirm_delete_no"),
+                InlineKeyboardButton(text="Да, удалить", callback_data=f"vpn:del_yes:{key_id}"),
+                InlineKeyboardButton(text="Нет", callback_data=f"vpn:del_no:{key_id}"),
             ]
+        ]
+    )
+
+
+def confirm_delete_all_vpn_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, удалить все", callback_data="vpn:del_all_yes"),
+                InlineKeyboardButton(text="Нет", callback_data="vpn:del_all_no"),
+            ]
+        ]
+    )
+
+
+def buy_plans_inline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Доп. ключ VPN", callback_data="buy:inv:ek")],
+            [
+                InlineKeyboardButton(text="1 мес", callback_data="buy:inv:r1"),
+                InlineKeyboardButton(text="3 мес", callback_data="buy:inv:r3"),
+            ],
+            [
+                InlineKeyboardButton(text="6 мес", callback_data="buy:inv:r6"),
+                InlineKeyboardButton(text="12 мес", callback_data="buy:inv:r12"),
+            ],
+            [InlineKeyboardButton(text="Главное меню", callback_data="nav:menu")],
         ]
     )
 
