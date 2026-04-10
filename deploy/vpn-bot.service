@@ -1,0 +1,31 @@
+# Шаблон systemd unit. Скопируйте в /etc/systemd/system/vpn-bot.service и поправьте пути.
+#
+# Предполагается:
+#   - код бота в /opt/vpn-bot (корень репозитория: есть каталог src/)
+#   - venv: /opt/vpn-bot/.venv
+#   - конфиг: /opt/vpn-bot/.env (или оставьте только WorkingDirectory — pydantic подхватит .env из cwd)
+
+[Unit]
+Description=Telegram VPN Bot (AccessGranted / 3X-UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vpn-bot
+Group=vpn-bot
+WorkingDirectory=/opt/vpn-bot
+# Раскомментируйте, если хотите явно передать переменные из файла:
+# EnvironmentFile=-/opt/vpn-bot/.env
+ExecStart=/opt/vpn-bot/.venv/bin/python -m src.app
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=30
+
+# Логи: journalctl -u vpn-bot.service -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

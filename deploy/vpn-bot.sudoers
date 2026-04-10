@@ -1,0 +1,8 @@
+# Фрагмент для /etc/sudoers.d/vpn-bot
+# Установка: sudo cp deploy/vpn-bot.sudoers /etc/sudoers.d/vpn-bot && sudo chmod 440 /etc/sudoers.d/vpn-bot
+# Проверка синтаксиса: sudo visudo -cf /etc/sudoers.d/vpn-bot
+#
+# Пользователь vpn-bot сможет БЕЗ пароля только управлять этим юнитом.
+# Если systemctl у вас в /bin/systemctl — замените путь в этой строке (должен совпадать с `command -v systemctl`).
+
+vpn-bot ALL=(root) NOPASSWD: /usr/bin/systemctl start vpn-bot.service, /usr/bin/systemctl stop vpn-bot.service, /usr/bin/systemctl restart vpn-bot.service, /usr/bin/systemctl status vpn-bot.service
