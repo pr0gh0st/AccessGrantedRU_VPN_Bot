@@ -5,10 +5,10 @@
 #   venv:        /home/vpn-bot/apps/vpn-bot/.venv
 #   .env:        /home/vpn-bot/apps/vpn-bot/.env
 #
-# Установка:
-#   sudo cp deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now vpn-bot.service
+# Установка (от root, см. deploy/README.md):
+#   cp deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
+#   systemctl daemon-reload
+#   systemctl enable --now vpn-bot.service
 
 [Unit]
 Description=Telegram VPN Bot (AccessGranted / 3X-UI)
