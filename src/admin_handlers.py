@@ -59,6 +59,20 @@ admin_router = Router(name="admin_router")
 USERS_PAGE_SIZE = 5
 
 
+def _admin_buy_sim_menu_caption() -> str:
+    cur = settings.CURRENCY
+    return (
+        "Меню покупки — тест без оплаты\n\n"
+        "Действия применяются к вашему аккаунту (как после успешной оплаты), "
+        "без Telegram Payments — для отладки меню.\n\n"
+        f"Цены как у пользователей: доп. ключ — {format_price_minor(settings.PRICE_EXTRA_VLESS_KEY, cur)}; "
+        f"1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
+        f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
+        f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
+        f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}."
+    )
+
+
 class AdminStates(StatesGroup):
     search_query = State()
     add_days_telegram = State()
@@ -103,6 +117,15 @@ async def cmd_admin(message: Message) -> None:
     await message.answer("Админ-панель", reply_markup=admin_main_inline_kb())
 
 
+@admin_router.message(Command("admin_shop"))
+async def cmd_admin_shop(message: Message) -> None:
+    user = await _load_admin_user(message)
+    if not _is_admin(user):
+        await message.answer("Доступ запрещён. Только для администраторов.")
+        return
+    await message.answer(_admin_buy_sim_menu_caption(), reply_markup=admin_buy_sim_inline_kb())
+
+
 @admin_router.callback_query(F.data == "admin:menu")
 async def cb_admin_menu(call: CallbackQuery, state: FSMContext) -> None:
     user = await _load_admin_user_from_call(call)
@@ -136,17 +159,7 @@ async def cb_admin_buy_sim_menu(call: CallbackQuery) -> None:
             return
 
     await call.answer()
-    cur = settings.CURRENCY
-    text = (
-        "Меню покупки — тест без оплаты\n\n"
-        "Действия применяются к вашему аккаунту (как после успешной оплаты), "
-        "без Telegram Payments — для отладки меню.\n\n"
-        f"Цены как у пользователей: доп. ключ — {format_price_minor(settings.PRICE_EXTRA_VLESS_KEY, cur)}; "
-        f"1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
-        f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
-        f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
-        f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}."
-    )
+    text = _admin_buy_sim_menu_caption()
     try:
         await call.message.edit_text(text, reply_markup=admin_buy_sim_inline_kb())
     except Exception:

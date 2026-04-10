@@ -192,7 +192,10 @@ def admin_main_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Пользователи", callback_data="admin:users:0")],
-            [InlineKeyboardButton(text="Найти пользователя", callback_data="admin:search")],
+            [
+                InlineKeyboardButton(text="Тест покупки", callback_data="admin:buy_sim_menu"),
+                InlineKeyboardButton(text="Найти", callback_data="admin:search"),
+            ],
             [
                 InlineKeyboardButton(text="+ дни", callback_data="admin:add_days"),
                 InlineKeyboardButton(text="− дни", callback_data="admin:sub_days"),
@@ -201,7 +204,6 @@ def admin_main_inline_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Рассылка", callback_data="admin:broadcast")],
             [InlineKeyboardButton(text="Статические профили", callback_data="admin:static")],
             [InlineKeyboardButton(text="Платежи", callback_data="admin:payments")],
-            [InlineKeyboardButton(text="Меню покупки (тест, без оплаты)", callback_data="admin:buy_sim_menu")],
             [InlineKeyboardButton(text="Сбросить trial себе", callback_data="admin:reset_trial_self")],
             [InlineKeyboardButton(text="Назад в меню", callback_data="nav:menu")],
         ]
