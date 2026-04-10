@@ -1,9 +1,14 @@
-# Шаблон systemd unit. Скопируйте в /etc/systemd/system/vpn-bot.service и поправьте пути.
+# systemd unit для этого репозитория на вашем VPS.
+# Размещение на сервере (как у вас уже настроено):
+#   пользователь: vpn-bot
+#   каталог:     /home/vpn-bot/apps/vpn-bot  (корень репозитория, есть src/)
+#   venv:        /home/vpn-bot/apps/vpn-bot/.venv
+#   .env:        /home/vpn-bot/apps/vpn-bot/.env
 #
-# Предполагается:
-#   - код бота в /opt/vpn-bot (корень репозитория: есть каталог src/)
-#   - venv: /opt/vpn-bot/.venv
-#   - конфиг: /opt/vpn-bot/.env (или оставьте только WorkingDirectory — pydantic подхватит .env из cwd)
+# Установка:
+#   sudo cp deploy/vpn-bot.service /etc/systemd/system/vpn-bot.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vpn-bot.service
 
 [Unit]
 Description=Telegram VPN Bot (AccessGranted / 3X-UI)
@@ -14,16 +19,13 @@ Wants=network-online.target
 Type=simple
 User=vpn-bot
 Group=vpn-bot
-WorkingDirectory=/opt/vpn-bot
-# Раскомментируйте, если хотите явно передать переменные из файла:
-# EnvironmentFile=-/opt/vpn-bot/.env
-ExecStart=/opt/vpn-bot/.venv/bin/python -m src.app
+WorkingDirectory=/home/vpn-bot/apps/vpn-bot
+ExecStart=/home/vpn-bot/apps/vpn-bot/.venv/bin/python -m src.app
 Restart=on-failure
 RestartSec=10
 KillMode=mixed
 TimeoutStopSec=30
 
-# Логи: journalctl -u vpn-bot.service -f
 StandardOutput=journal
 StandardError=journal
 
