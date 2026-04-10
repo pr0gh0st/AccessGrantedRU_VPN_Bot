@@ -180,32 +180,32 @@ async def buy_handler(message: Message) -> None:
         user = await _get_user_for_message(session, message.from_user)
         keys = await list_user_vless_keys(session, user_id=user.id)
 
-    if not keys:
+        if not keys:
+            await message.answer(
+                "Сначала создайте хотя бы один ключ в разделе «Мой VPN» (trial или после оплаты).",
+                reply_markup=main_menu_inline_kb(),
+            )
+            return
+
+        pick_rows: list[tuple[str, str]] = []
+        for i, k in enumerate(keys):
+            label = f"Ключ №{i + 1} · до {format_datetime_ru(k.subscription_end)}"
+            if len(label) > 58:
+                label = label[:55] + "…"
+            pick_rows.append((label, f"buy:pk:{k.id}"))
+
         await message.answer(
-            "Сначала создайте хотя бы один ключ в разделе «Мой VPN» (trial или после оплаты).",
-            reply_markup=main_menu_inline_kb(),
+            "Покупка\n\n"
+            "Срок доступа считается отдельно для каждого ключа. Выберите ключ, который нужно продлить, "
+            "затем срок — откроется счёт Telegram Payments.\n\n"
+            f"Цены: 1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
+            f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
+            f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
+            f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}.\n\n"
+            "Дополнительный ключ на 60 минут — бесплатно в «Мой VPN».\n"
+            "Админам: тест без оплаты — «Тест покупки» в /admin.",
+            reply_markup=buy_key_pick_inline_kb(pick_rows),
         )
-        return
-
-    pick_rows: list[tuple[str, str]] = []
-    for i, k in enumerate(keys):
-        label = f"Ключ №{i + 1} · до {format_datetime_ru(k.subscription_end)}"
-        if len(label) > 58:
-            label = label[:55] + "…"
-        pick_rows.append((label, f"buy:pk:{k.id}"))
-
-    await message.answer(
-        "Покупка\n\n"
-        "Срок доступа считается отдельно для каждого ключа. Выберите ключ, который нужно продлить, "
-        "затем срок — откроется счёт Telegram Payments.\n\n"
-        f"Цены: 1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
-        f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
-        f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
-        f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}.\n\n"
-        "Дополнительный ключ на 60 минут — бесплатно в «Мой VPN».\n"
-        "Админам: тест без оплаты — «Тест покупки» в /admin.",
-        reply_markup=buy_key_pick_inline_kb(pick_rows),
-    )
 
 
 @router.message(Command("myvpn"))
@@ -215,33 +215,33 @@ async def myvpn_handler(message: Message, event_user: Optional[TgUser] = None) -
         user = await _get_user_for_message(session, tg)
         keys = await list_user_vless_keys(session, user_id=user.id)
 
-    subscription_active = _is_subscription_active(user)
-    keys_count = len(keys)
-    key_rows = [(k.id, i + 1) for i, k in enumerate(keys)]
+        subscription_active = _is_subscription_active(user)
+        keys_count = len(keys)
+        key_rows = [(k.id, i + 1) for i, k in enumerate(keys)]
 
-    if not subscription_active:
-        await message.answer(
-            "Подписка не активна. Чтобы получить доступ к VPN, активируйте trial или оформите покупку.",
-            reply_markup=main_menu_inline_kb(),
+        if not subscription_active:
+            await message.answer(
+                "Подписка не активна. Чтобы получить доступ к VPN, активируйте trial или оформите покупку.",
+                reply_markup=main_menu_inline_kb(),
+            )
+            return
+
+        can_create_first = keys_count == 0
+        show_buy_extra = await user_can_add_extra_key_trial(
+            session, user=user, keys_count=keys_count
         )
-        return
+        show_delete_all = keys_count >= 2
 
-    can_create_first = keys_count == 0
-    show_buy_extra = await user_can_add_extra_key_trial(
-        session, user=user, keys_count=keys_count
-    )
-    show_delete_all = keys_count >= 2
-
-    await message.answer(
-        _myvpn_status_text(user, keys=keys),
-        reply_markup=vpn_keys_inline_kb(
-            key_rows=key_rows,
-            subscription_active=subscription_active,
-            can_create_first_free=can_create_first,
-            show_buy_extra=show_buy_extra,
-            show_delete_all=show_delete_all,
-        ),
-    )
+        await message.answer(
+            _myvpn_status_text(user, keys=keys),
+            reply_markup=vpn_keys_inline_kb(
+                key_rows=key_rows,
+                subscription_active=subscription_active,
+                can_create_first_free=can_create_first,
+                show_buy_extra=show_buy_extra,
+                show_delete_all=show_delete_all,
+            ),
+        )
 
 
 @router.message(Command("traffic"))
@@ -666,17 +666,17 @@ async def buy_back_to_keys_callback(call: CallbackQuery) -> None:
         user = await _get_user_for_message(session, call.from_user)
         keys = await list_user_vless_keys(session, user_id=user.id)
 
-    if not keys:
-        await call.answer()
-        await call.message.edit_text("Ключей нет.", reply_markup=main_menu_inline_kb())
-        return
+        if not keys:
+            await call.answer()
+            await call.message.edit_text("Ключей нет.", reply_markup=main_menu_inline_kb())
+            return
 
-    pick_rows: list[tuple[str, str]] = []
-    for i, k in enumerate(keys):
-        label = f"Ключ №{i + 1} · до {format_datetime_ru(k.subscription_end)}"
-        if len(label) > 58:
-            label = label[:55] + "…"
-        pick_rows.append((label, f"buy:pk:{k.id}"))
+        pick_rows: list[tuple[str, str]] = []
+        for i, k in enumerate(keys):
+            label = f"Ключ №{i + 1} · до {format_datetime_ru(k.subscription_end)}"
+            if len(label) > 58:
+                label = label[:55] + "…"
+            pick_rows.append((label, f"buy:pk:{k.id}"))
 
     await call.answer()
     try:
