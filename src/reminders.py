@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .database import User, async_session_factory, get_active_users_subscription_ending_within
+from .database import User, UserVlessKey, async_session_factory, get_vless_keys_subscription_ending_within
 from .utils import format_datetime_ru
 
 logger = logging.getLogger(__name__)
@@ -39,73 +39,92 @@ def _remaining(subscription_end: dt.datetime, now: dt.datetime) -> dt.timedelta:
 
 async def run_subscription_reminder_tick(bot: Bot, *, now: dt.datetime) -> None:
     """
-    Один проход: напоминание за 24 часа и за 1 час до subscription_end.
-    Дедупликация по полям reminder_*_for_subscription_end == текущий subscription_end.
+    Один проход: напоминание за 24 ч и за 1 ч до окончания срока каждого ключа.
+    Дедупликация по полям reminder_* на строке user_vless_keys.
     """
 
     async with async_session_factory() as session:
-        users = await get_active_users_subscription_ending_within(
+        pairs = await get_vless_keys_subscription_ending_within(
             session,
             now=now,
             within_hours=48,
             limit=5000,
         )
 
-        for user in users:
-            await _maybe_notify_user(session, bot, user, now)
+        for user, key in pairs:
+            await _maybe_notify_for_key(session, bot, user, key, now)
 
 
-async def _maybe_notify_user(session: AsyncSession, bot: Bot, user: User, now: dt.datetime) -> None:
-    if user.subscription_end is None:
+async def _key_display_number(session: AsyncSession, *, user_id: int, key_id: int) -> int:
+    from .database import list_user_vless_keys
+
+    keys = await list_user_vless_keys(session, user_id=user_id)
+    for i, k in enumerate(keys):
+        if k.id == key_id:
+            return i + 1
+    return key_id
+
+
+async def _maybe_notify_for_key(
+    session: AsyncSession,
+    bot: Bot,
+    user: User,
+    key: UserVlessKey,
+    now: dt.datetime,
+) -> None:
+    if key.subscription_end is None:
         return
 
-    rem = _remaining(user.subscription_end, now)
+    rem = _remaining(key.subscription_end, now)
     if rem <= dt.timedelta(0):
         return
 
-    sub_end = user.subscription_end
+    sub_end = key.subscription_end
+    num = await _key_display_number(session, user_id=user.id, key_id=key.id)
 
-    # Сначала более срочное (≤1 ч), затем 24 ч.
     if dt.timedelta(0) < rem <= dt.timedelta(hours=1):
-        if _same_subscription_end(user.reminder_1h_for_subscription_end, sub_end):
+        if _same_subscription_end(key.reminder_1h_for_subscription_end, sub_end):
             return
         text = (
-            "Напоминание: до окончания подписки осталось менее часа.\n"
+            f"Напоминание: до окончания срока ключа №{num} осталось менее часа.\n"
             f"Окончание: {format_datetime_ru(sub_end)}"
         )
-        if await _send_and_mark(
+        if await _send_and_mark_key(
             session,
             bot,
             user,
+            key,
             text,
             mark_24h=False,
             mark_1h=True,
         ):
-            logger.info("Sent 1h reminder tg_id=%s", user.telegram_id)
+            logger.info("Sent 1h key reminder tg_id=%s key_id=%s", user.telegram_id, key.id)
         return
 
     if dt.timedelta(hours=1) < rem <= dt.timedelta(hours=24):
-        if _same_subscription_end(user.reminder_24h_for_subscription_end, sub_end):
+        if _same_subscription_end(key.reminder_24h_for_subscription_end, sub_end):
             return
         text = (
-            "Напоминание: до окончания подписки осталось менее 24 часов.\n"
+            f"Напоминание: до окончания срока ключа №{num} осталось менее 24 часов.\n"
             f"Окончание: {format_datetime_ru(sub_end)}"
         )
-        if await _send_and_mark(
+        if await _send_and_mark_key(
             session,
             bot,
             user,
+            key,
             text,
             mark_24h=True,
             mark_1h=False,
         ):
-            logger.info("Sent 24h reminder tg_id=%s", user.telegram_id)
+            logger.info("Sent 24h key reminder tg_id=%s key_id=%s", user.telegram_id, key.id)
 
 
-async def _send_and_mark(
+async def _send_and_mark_key(
     session: AsyncSession,
     bot: Bot,
     user: User,
+    key: UserVlessKey,
     text: str,
     *,
     mark_24h: bool,
@@ -117,10 +136,10 @@ async def _send_and_mark(
         logger.info("Cannot send reminder to tg_id=%s", user.telegram_id)
         return False
 
-    sub = user.subscription_end
+    sub = key.subscription_end
     if mark_24h:
-        user.reminder_24h_for_subscription_end = sub
+        key.reminder_24h_for_subscription_end = sub
     if mark_1h:
-        user.reminder_1h_for_subscription_end = sub
+        key.reminder_1h_for_subscription_end = sub
     await session.commit()
     return True

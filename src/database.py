@@ -105,6 +105,14 @@ class UserVlessKey(Base):
     vless_remark: Mapped[str] = mapped_column(String(255), nullable=False)
     vless_profile_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Срок действия доступа по этому ключу (независимо от других ключей пользователя).
+    subscription_end: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    reminder_24h_for_subscription_end: Mapped[Optional[dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reminder_1h_for_subscription_end: Mapped[Optional[dt.datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class StaticProfile(Base):
@@ -168,6 +176,55 @@ async def _sqlite_add_user_reminder_columns(conn) -> None:
         )
 
 
+async def _migrate_vless_key_subscription_columns(conn) -> None:
+    """Добавляем поля срока подписки по ключу и бэкаплим из users.subscription_end."""
+
+    is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
+
+    async def _add_col(name: str, sql_sqlite: str, sql_pg: str) -> None:
+        if is_sqlite:
+            result = await conn.execute(text("PRAGMA table_info(user_vless_keys)"))
+            cols = {row[1] for row in result.all()}
+            if name not in cols:
+                await conn.execute(text(sql_sqlite))
+        else:
+            try:
+                await conn.execute(text(sql_pg))
+            except Exception:
+                logging.getLogger(__name__).debug("add column %s skipped", name, exc_info=True)
+
+    await _add_col(
+        "subscription_end",
+        "ALTER TABLE user_vless_keys ADD COLUMN subscription_end DATETIME",
+        "ALTER TABLE user_vless_keys ADD COLUMN subscription_end TIMESTAMP WITH TIME ZONE",
+    )
+    await _add_col(
+        "reminder_24h_for_subscription_end",
+        "ALTER TABLE user_vless_keys ADD COLUMN reminder_24h_for_subscription_end DATETIME",
+        "ALTER TABLE user_vless_keys ADD COLUMN reminder_24h_for_subscription_end TIMESTAMP WITH TIME ZONE",
+    )
+    await _add_col(
+        "reminder_1h_for_subscription_end",
+        "ALTER TABLE user_vless_keys ADD COLUMN reminder_1h_for_subscription_end DATETIME",
+        "ALTER TABLE user_vless_keys ADD COLUMN reminder_1h_for_subscription_end TIMESTAMP WITH TIME ZONE",
+    )
+
+    try:
+        await conn.execute(
+            text(
+                """
+                UPDATE user_vless_keys
+                SET subscription_end = (
+                    SELECT u.subscription_end FROM users u WHERE u.id = user_vless_keys.user_id
+                )
+                WHERE subscription_end IS NULL
+                """
+            )
+        )
+    except Exception:
+        logging.getLogger(__name__).warning("backfill user_vless_keys.subscription_end failed", exc_info=True)
+
+
 async def _migrate_legacy_vless_into_keys(conn) -> None:
     """Перенос единственного профиля из users.* в user_vless_keys (однократно)."""
 
@@ -197,6 +254,7 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await _sqlite_add_user_reminder_columns(conn)
         await _migrate_legacy_vless_into_keys(conn)
+        await _migrate_vless_key_subscription_columns(conn)
 
 
 async def create_user_if_not_exists(
@@ -235,16 +293,58 @@ async def get_user_by_telegram_id(session: AsyncSession, telegram_id: int) -> Op
     return result.scalar_one_or_none()
 
 
-async def extend_subscription(session: AsyncSession, *, telegram_id: int, months: int) -> User:
+async def get_user_by_id(session: AsyncSession, *, user_id: int) -> Optional[User]:
+    result = await session.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
+
+
+async def sync_user_subscription_aggregate(session: AsyncSession, *, user_id: int) -> User:
+    """Синхронизирует users.subscription_end / is_active по максимуму сроков ключей."""
+
+    result = await session.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise LookupError("User not found")
+
+    keys = await list_user_vless_keys(session, user_id=user_id)
+    now = _utc_now()
+    if not keys:
+        user.subscription_end = None
+        user.is_active = False
+        await session.commit()
+        return user
+
+    ends = [k.subscription_end for k in keys if k.subscription_end is not None]
+    if not ends:
+        user.is_active = False
+        await session.commit()
+        return user
+
+    max_end = max(ends)
+    user.subscription_end = max_end
+    user.is_active = max_end > now
+    await session.commit()
+    return user
+
+
+async def extend_subscription_for_key(
+    session: AsyncSession, *, telegram_id: int, key_id: int, months: int
+) -> tuple[User, UserVlessKey]:
+    """Продлевает срок только у выбранного VLESS-ключа."""
+
     if months <= 0:
         raise ValueError("months must be > 0")
+
+    key = await get_user_vless_key_owned(session, key_id=key_id, telegram_id=telegram_id)
+    if key is None:
+        raise LookupError("Key not found")
 
     user = await get_user_by_telegram_id(session, telegram_id)
     if user is None:
         raise LookupError("User not found")
 
     now = _utc_now()
-    base_end = user.subscription_end or now
+    base_end = key.subscription_end or now
     if base_end <= now:
         base_end = now
 
@@ -252,10 +352,15 @@ async def extend_subscription(session: AsyncSession, *, telegram_id: int, months
     if user.subscription_start is None or user.subscription_start <= now - dt.timedelta(days=365 * 100):
         user.subscription_start = now
 
-    user.subscription_end = new_end
+    key.subscription_end = new_end
     user.is_active = True
     await session.commit()
-    return user
+    await sync_user_subscription_aggregate(session, user_id=user.id)
+
+    user2 = (await session.execute(select(User).where(User.id == user.id))).scalar_one()
+    key2 = await get_user_vless_key_owned(session, key_id=key_id, telegram_id=telegram_id)
+    assert key2 is not None
+    return user2, key2
 
 
 async def activate_trial(session: AsyncSession, *, telegram_id: int, trial_days: int) -> User:
@@ -300,6 +405,40 @@ async def list_user_vless_keys(session: AsyncSession, *, user_id: int) -> list[U
     return list(result.scalars().all())
 
 
+async def list_vless_keys_expired(session: AsyncSession, *, limit: int = 200) -> list[UserVlessKey]:
+    now = _utc_now()
+    stmt = (
+        select(UserVlessKey)
+        .where(UserVlessKey.subscription_end.is_not(None))
+        .where(UserVlessKey.subscription_end <= now)
+        .order_by(UserVlessKey.subscription_end.asc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def get_vless_keys_subscription_ending_within(
+    session: AsyncSession,
+    *,
+    now: dt.datetime,
+    within_hours: int = 48,
+    limit: int = 5000,
+) -> list[tuple[User, UserVlessKey]]:
+    horizon = now + dt.timedelta(hours=within_hours)
+    stmt = (
+        select(User, UserVlessKey)
+        .join(User, User.id == UserVlessKey.user_id)
+        .where(UserVlessKey.subscription_end.is_not(None))
+        .where(UserVlessKey.subscription_end > now)
+        .where(UserVlessKey.subscription_end <= horizon)
+        .order_by(UserVlessKey.subscription_end.asc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return [(row[0], row[1]) for row in result.all()]
+
+
 async def count_user_vless_keys(session: AsyncSession, *, user_id: int) -> int:
     stmt = select(func.count()).select_from(UserVlessKey).where(UserVlessKey.user_id == user_id)
     result = await session.execute(stmt)
@@ -327,6 +466,7 @@ async def add_user_vless_key(
     vless_email: str,
     vless_remark: str,
     vless_profile_data: str,
+    subscription_end: Optional[dt.datetime] = None,
 ) -> UserVlessKey:
     row = UserVlessKey(
         user_id=user_id,
@@ -334,10 +474,12 @@ async def add_user_vless_key(
         vless_email=vless_email,
         vless_remark=vless_remark,
         vless_profile_data=vless_profile_data,
+        subscription_end=subscription_end,
     )
     session.add(row)
     await session.commit()
     await sync_user_legacy_vless_from_keys(session, user_id=user_id)
+    await sync_user_subscription_aggregate(session, user_id=user_id)
     return row
 
 
@@ -351,6 +493,7 @@ async def delete_owned_user_vless_key(
     await session.execute(delete(UserVlessKey).where(UserVlessKey.id == key_id))
     await session.commit()
     await sync_user_legacy_vless_from_keys(session, user_id=uid)
+    await sync_user_subscription_aggregate(session, user_id=uid)
     return row
 
 
@@ -388,7 +531,7 @@ async def remove_vless_profile(session: AsyncSession, *, telegram_id: int) -> Us
     user.vless_remark = None
     user.vless_profile_data = None
     await session.commit()
-    return user
+    return await sync_user_subscription_aggregate(session, user_id=user.id)
 
 
 async def payment_log_exists_by_telegram_charge(session: AsyncSession, *, charge_id: str) -> bool:
@@ -657,6 +800,7 @@ async def extend_subscription_by_days(session: AsyncSession, *, telegram_id: int
 
     now = _utc_now()
     delta = dt.timedelta(days=abs(days))
+    day_shift = dt.timedelta(days=days)
     if days > 0:
         base = user.subscription_end or now
         if base <= now:
@@ -674,7 +818,14 @@ async def extend_subscription_by_days(session: AsyncSession, *, telegram_id: int
         if new_end <= now:
             user.is_active = False
 
+    keys = await list_user_vless_keys(session, user_id=user.id)
+    for k in keys:
+        if k.subscription_end is not None:
+            k.subscription_end = k.subscription_end + day_shift
+
     await session.commit()
+    if keys:
+        return await sync_user_subscription_aggregate(session, user_id=user.id)
     return user
 
 

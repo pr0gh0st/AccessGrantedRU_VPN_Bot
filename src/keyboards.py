@@ -65,7 +65,9 @@ def vpn_keys_inline_kb(
         if can_create_first_free:
             buttons.append([InlineKeyboardButton(text="Создать первый ключ", callback_data="vpn:create")])
         if show_buy_extra:
-            buttons.append([InlineKeyboardButton(text="Купить доп. ключ", callback_data="buy:inv:ek")])
+            buttons.append(
+                [InlineKeyboardButton(text="Доп. ключ (60 мин бесплатно)", callback_data="vpn:trial_extra")]
+            )
         if show_delete_all:
             buttons.append([InlineKeyboardButton(text="Удалить все ключи", callback_data="vpn:delete_all")])
 
@@ -95,70 +97,98 @@ def confirm_delete_all_vpn_kb() -> InlineKeyboardMarkup:
     )
 
 
-def _buy_plans_kb(
-    *,
-    cb_ek: str,
-    cb_r1: str,
-    cb_r3: str,
-    cb_r6: str,
-    cb_r12: str,
-    back_cb: str,
-) -> InlineKeyboardMarkup:
+def buy_plans_for_key_inline_kb(*, key_id: int, back_callback: str = "buy:back_keys") -> InlineKeyboardMarkup:
+    """Тарифы для выбранного ключа; invoice payload формируется как rN:key_id."""
+
     cur = settings.CURRENCY
+    kid = key_id
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=f"Доп. ключ · {format_price_minor(settings.PRICE_EXTRA_VLESS_KEY, cur)}",
-                    callback_data=cb_ek,
-                )
-            ],
-            [
-                InlineKeyboardButton(
                     text=f"1 мес · {format_price_minor(settings.PRICE_1_MONTH, cur)}",
-                    callback_data=cb_r1,
+                    callback_data=f"buy:inv:r1:{kid}",
                 ),
                 InlineKeyboardButton(
                     text=f"3 мес · {format_price_minor(settings.PRICE_3_MONTHS, cur)}",
-                    callback_data=cb_r3,
+                    callback_data=f"buy:inv:r3:{kid}",
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text=f"6 мес · {format_price_minor(settings.PRICE_6_MONTHS, cur)}",
-                    callback_data=cb_r6,
+                    callback_data=f"buy:inv:r6:{kid}",
                 ),
                 InlineKeyboardButton(
                     text=f"12 мес · {format_price_minor(settings.PRICE_12_MONTHS, cur)}",
-                    callback_data=cb_r12,
+                    callback_data=f"buy:inv:r12:{kid}",
                 ),
             ],
-            [InlineKeyboardButton(text="Назад", callback_data=back_cb)],
+            [InlineKeyboardButton(text="Назад", callback_data=back_callback)],
         ]
     )
 
 
-def buy_plans_inline_kb() -> InlineKeyboardMarkup:
-    return _buy_plans_kb(
-        cb_ek="buy:inv:ek",
-        cb_r1="buy:inv:r1",
-        cb_r3="buy:inv:r3",
-        cb_r6="buy:inv:r6",
-        cb_r12="buy:inv:r12",
-        back_cb="nav:menu",
-    )
+def buy_key_pick_inline_kb(rows: Sequence[tuple[str, str]]) -> InlineKeyboardMarkup:
+    """rows: (текст кнопки, callback_data)."""
+
+    inline_keyboard: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text=text, callback_data=cb)] for text, cb in rows
+    ]
+    inline_keyboard.append([InlineKeyboardButton(text="Назад в меню", callback_data="nav:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
 
-def admin_buy_sim_inline_kb() -> InlineKeyboardMarkup:
-    """То же меню цен, что у пользователей; callback — без оплаты (только админ)."""
+def admin_buy_sim_root_inline_kb(
+    *, key_specs: Sequence[tuple[int, int]], show_trial_extra: bool = True
+) -> InlineKeyboardMarkup:
+    """key_specs: (key_id, номер для отображения)."""
 
-    return _buy_plans_kb(
-        cb_ek="admin:buy_sim:ek",
-        cb_r1="admin:buy_sim:r1",
-        cb_r3="admin:buy_sim:r3",
-        cb_r6="admin:buy_sim:r6",
-        cb_r12="admin:buy_sim:r12",
-        back_cb="admin:menu",
+    rows: list[list[InlineKeyboardButton]] = []
+    if show_trial_extra:
+        rows.append(
+            [InlineKeyboardButton(text="Доп. ключ (trial 60 мин)", callback_data="admin:buy_sim:tk")]
+        )
+    for key_id, num in key_specs:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Продлить ключ №{num}",
+                    callback_data=f"admin:buy_sim:k:{key_id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="admin:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def admin_buy_plans_for_key_inline_kb(*, key_id: int) -> InlineKeyboardMarkup:
+    cur = settings.CURRENCY
+    kid = key_id
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"1 мес · {format_price_minor(settings.PRICE_1_MONTH, cur)}",
+                    callback_data=f"admin:buy_sim:m:r1:{kid}",
+                ),
+                InlineKeyboardButton(
+                    text=f"3 мес · {format_price_minor(settings.PRICE_3_MONTHS, cur)}",
+                    callback_data=f"admin:buy_sim:m:r3:{kid}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"6 мес · {format_price_minor(settings.PRICE_6_MONTHS, cur)}",
+                    callback_data=f"admin:buy_sim:m:r6:{kid}",
+                ),
+                InlineKeyboardButton(
+                    text=f"12 мес · {format_price_minor(settings.PRICE_12_MONTHS, cur)}",
+                    callback_data=f"admin:buy_sim:m:r12:{kid}",
+                ),
+            ],
+            [InlineKeyboardButton(text="Назад", callback_data="admin:buy_sim_menu")],
+        ]
     )
 
 

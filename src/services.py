@@ -13,7 +13,6 @@ from .database import (
     User,
     activate_trial,
     add_user_vless_key,
-    count_user_vless_keys,
     create_user_if_not_exists,
     delete_owned_user_vless_key,
     get_user_vless_key_owned,
@@ -62,6 +61,21 @@ def _to_xui_expiry_ms(value: Optional[dt.datetime]) -> int:
     if value.tzinfo is None:
         value = value.replace(tzinfo=dt.timezone.utc)
     return int(value.timestamp() * 1000)
+
+
+async def push_key_expiry_to_xui(
+    xui: XUIAPI,
+    *,
+    vless_uuid: str,
+    vless_email: str,
+    subscription_end: Optional[dt.datetime],
+) -> None:
+    await xui.update_client_expiry_ms(
+        inbound_id=settings.INBOUND_ID,
+        client_id=vless_uuid,
+        expiry_ms=_to_xui_expiry_ms(subscription_end),
+        email=vless_email,
+    )
 
 
 async def get_or_create_user(
@@ -184,6 +198,7 @@ async def activate_trial_and_create_vless_profile(
             vless_email=vless_email,
             vless_remark=vless_remark,
             vless_profile_data=vless_profile_data,
+            subscription_end=user.subscription_end,
         )
     except Exception as e:
         raise ServiceError(f"Не удалось сохранить VLESS профиль в БД: {e}") from e
@@ -250,6 +265,7 @@ async def ensure_vless_profile_for_user(
         vless_email=vless_email,
         vless_remark=vless_remark,
         vless_profile_data=vless_profile_data,
+        subscription_end=user.subscription_end,
     )
 
     return _build_vless_url_for_key(
@@ -261,20 +277,27 @@ async def ensure_vless_profile_for_user(
     )
 
 
-async def create_extra_vless_key_after_payment(
+async def create_extra_vless_key_trial(
     *,
     session: AsyncSession,
     user: User,
     xui: XUIAPI,
 ) -> str:
-    """Дополнительный ключ (оплата)."""
+    """Дополнительный ключ с бесплатным пробным периодом (только срок ключа, не общая подписка)."""
 
-    if not _is_subscription_active(user):
-        raise ServiceError("Подписка не активна.")
-
-    n_existing = await count_user_vless_keys(session, user_id=user.id)
+    keys = await list_user_vless_keys(session, user_id=user.id)
+    n_existing = len(keys)
+    if n_existing < 1:
+        raise ServiceError("Сначала создайте первый ключ.")
     if n_existing >= settings.MAX_VLESS_KEYS:
         raise ServiceError(f"Достигнут лимит ключей ({settings.MAX_VLESS_KEYS}).")
+
+    now = _utc_now()
+    if not any(k.subscription_end and k.subscription_end > now for k in keys):
+        raise ServiceError("Нужен хотя бы один ключ с не истёкшим сроком доступа.")
+
+    trial_end = now + dt.timedelta(minutes=settings.EXTRA_KEY_TRIAL_MINUTES)
+    expiry_ms = _to_xui_expiry_ms(trial_end)
 
     inbound = await xui.get_inbound(settings.INBOUND_ID)
     port = inbound.get("port")
@@ -290,7 +313,7 @@ async def create_extra_vless_key_after_payment(
         "id": vless_uuid,
         "email": vless_email,
         "enable": True,
-        "expiryTime": _to_xui_expiry_ms(user.subscription_end),
+        "expiryTime": expiry_ms,
         "totalGB": 0,
         "limitIp": 0,
         "tgId": "",
@@ -307,6 +330,7 @@ async def create_extra_vless_key_after_payment(
         vless_email=vless_email,
         vless_remark=vless_remark,
         vless_profile_data=vless_profile_data,
+        subscription_end=trial_end,
     )
 
     return _build_vless_url_for_key(
@@ -406,5 +430,11 @@ def user_can_activate_trial(user: User) -> bool:
     return not user.is_trial_used
 
 
-def user_can_buy_extra_key(*, user: User, keys_count: int) -> bool:
-    return _is_subscription_active(user) and keys_count < settings.MAX_VLESS_KEYS
+async def user_can_add_extra_key_trial(
+    session: AsyncSession, *, user: User, keys_count: int
+) -> bool:
+    if keys_count < 1 or keys_count >= settings.MAX_VLESS_KEYS:
+        return False
+    keys = await list_user_vless_keys(session, user_id=user.id)
+    now = _utc_now()
+    return any(k.subscription_end and k.subscription_end > now for k in keys)

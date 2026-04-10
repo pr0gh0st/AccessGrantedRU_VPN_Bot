@@ -14,9 +14,12 @@ from .config import settings
 from .database import (
     UserVlessKey,
     async_session_factory,
-    get_expired_active_users,
+    get_user_by_id,
     init_db,
     list_user_vless_keys,
+    list_vless_keys_expired,
+    sync_user_legacy_vless_from_keys,
+    sync_user_subscription_aggregate,
 )
 from .functions import XUIAPI
 from .handlers import router
@@ -28,51 +31,68 @@ logger = logging.getLogger(__name__)
 async def _expired_subscriptions_worker(bot: Bot) -> None:
     """
     Hourly background task:
-    - find expired active users
-    - remove VLESS client from XUI
-    - deactivate user in DB
-    - notify user
+    - находим ключи с истекшим subscription_end;
+    - удаляем клиента в XUI и строку ключа;
+    - синхронизируем сводку по пользователю;
+    - уведомляем (если у пользователя ещё есть другие ключи — только про этот ключ).
     """
 
     while True:
         try:
             async with async_session_factory() as session:
-                expired_users = await get_expired_active_users(session, limit=500)
+                expired_keys = await list_vless_keys_expired(session, limit=500)
 
-                if expired_users:
+                if expired_keys:
                     xui = XUIAPI()
                     try:
-                        for user in expired_users:
-                            keys = await list_user_vless_keys(session, user_id=user.id)
-                            for k in keys:
-                                try:
-                                    await xui.remove_client(
-                                        inbound_id=settings.INBOUND_ID, client_id=k.vless_uuid
-                                    )
-                                except Exception:
-                                    logger.warning(
-                                        "Failed to remove expired user client in XUI tg_id=%s",
-                                        user.telegram_id,
-                                    )
+                        for key in expired_keys:
+                            user = await get_user_by_id(session, user_id=key.user_id)
+                            if user is None:
+                                continue
 
-                            await session.execute(delete(UserVlessKey).where(UserVlessKey.user_id == user.id))
-                            user.is_active = False
-                            user.vless_uuid = None
-                            user.vless_email = None
-                            user.vless_remark = None
-                            user.vless_profile_data = None
-                            await session.commit()
+                            keys_before = await list_user_vless_keys(session, user_id=user.id)
+                            display_num = next(
+                                (i + 1 for i, k in enumerate(keys_before) if k.id == key.id),
+                                0,
+                            )
 
                             try:
-                                await bot.send_message(
-                                    chat_id=user.telegram_id,
-                                    text=(
-                                        "Срок вашей подписки истёк.\n"
-                                        "VPN-ключи отключены. Чтобы продолжить пользоваться сервисом, продлите подписку."
-                                    ),
+                                await xui.remove_client(
+                                    inbound_id=settings.INBOUND_ID, client_id=key.vless_uuid
                                 )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to remove expired key client in XUI tg_id=%s key_id=%s",
+                                    user.telegram_id,
+                                    key.id,
+                                    exc_info=True,
+                                )
+
+                            await session.execute(delete(UserVlessKey).where(UserVlessKey.id == key.id))
+                            await session.commit()
+                            await sync_user_legacy_vless_from_keys(session, user_id=user.id)
+                            await sync_user_subscription_aggregate(session, user_id=user.id)
+
+                            remaining = await list_user_vless_keys(session, user_id=user.id)
+                            try:
+                                if remaining:
+                                    await bot.send_message(
+                                        chat_id=user.telegram_id,
+                                        text=(
+                                            f"Срок действия ключа №{display_num} истёк, он отключён.\n"
+                                            "Остальные ключи (если есть) продолжают работать до своей даты."
+                                        ),
+                                    )
+                                else:
+                                    await bot.send_message(
+                                        chat_id=user.telegram_id,
+                                        text=(
+                                            "Срок действия всех VPN-ключей истёк.\n"
+                                            "Чтобы продолжить пользоваться сервисом, продлите доступ в разделе «Купить подписку»."
+                                        ),
+                                    )
                             except TelegramAPIError:
-                                logger.info("Cannot notify expired user tg_id=%s", user.telegram_id)
+                                logger.info("Cannot notify expired key user tg_id=%s", user.telegram_id)
                     finally:
                         await xui.close()
         except Exception:

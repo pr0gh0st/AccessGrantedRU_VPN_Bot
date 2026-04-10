@@ -21,8 +21,9 @@ from .database import (
     count_users_total,
     count_users_with_active_subscription,
     delete_static_profile,
-    extend_subscription,
+    extend_subscription_for_key,
     extend_subscription_by_days,
+    get_user_vless_key_owned,
     get_all_telegram_ids,
     get_all_users,
     get_recent_payment_logs,
@@ -35,7 +36,8 @@ from .database import (
 )
 from .functions import XUIAPI
 from .keyboards import (
-    admin_buy_sim_inline_kb,
+    admin_buy_plans_for_key_inline_kb,
+    admin_buy_sim_root_inline_kb,
     admin_cancel_fsm_kb,
     admin_main_inline_kb,
     admin_static_menu_kb,
@@ -45,12 +47,18 @@ from .keyboards import (
 from .services import (
     ServiceError,
     _is_subscription_active,
-    create_extra_vless_key_after_payment,
+    create_extra_vless_key_trial,
     format_admin_user_card,
     get_or_create_user,
-    user_can_buy_extra_key,
+    push_key_expiry_to_xui,
+    user_can_add_extra_key_trial,
 )
-from .utils import format_datetime_ru, format_price_minor, vless_url_as_html_code
+from .utils import (
+    format_datetime_ru,
+    format_price_minor,
+    trial_extra_deadline_phrase_ru,
+    vless_url_as_html_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +71,28 @@ def _admin_buy_sim_menu_caption() -> str:
     cur = settings.CURRENCY
     return (
         "Меню покупки — тест без оплаты\n\n"
-        "Действия применяются к вашему аккаунту (как после успешной оплаты), "
-        "без Telegram Payments — для отладки меню.\n\n"
-        f"Цены как у пользователей: доп. ключ — {format_price_minor(settings.PRICE_EXTRA_VLESS_KEY, cur)}; "
-        f"1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
+        "Дополнительный ключ — бесплатный trial, как у пользователей "
+        f"({settings.EXTRA_KEY_TRIAL_MINUTES} мин). Продление — отдельно для каждого ключа.\n\n"
+        f"Цены продления: 1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
         f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
         f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
         f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}."
     )
+
+
+async def _admin_buy_sim_keyboard(session, *, telegram_id: int, username: str | None, full_name: str | None):
+    u = await get_or_create_user(
+        session=session,
+        telegram_id=telegram_id,
+        username=username,
+        full_name=full_name,
+    )
+    keys = await list_user_vless_keys(session, user_id=u.id)
+    key_specs = [(k.id, i + 1) for i, k in enumerate(keys)]
+    show_trial = await user_can_add_extra_key_trial(
+        session, user=u, keys_count=len(keys)
+    )
+    return admin_buy_sim_root_inline_kb(key_specs=key_specs, show_trial_extra=show_trial)
 
 
 class AdminStates(StatesGroup):
@@ -123,7 +145,14 @@ async def cmd_admin_shop(message: Message) -> None:
     if not _is_admin(user):
         await message.answer("Доступ запрещён. Только для администраторов.")
         return
-    await message.answer(_admin_buy_sim_menu_caption(), reply_markup=admin_buy_sim_inline_kb())
+    async with async_session_factory() as session:
+        kb = await _admin_buy_sim_keyboard(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name,
+        )
+    await message.answer(_admin_buy_sim_menu_caption(), reply_markup=kb)
 
 
 @admin_router.callback_query(F.data == "admin:menu")
@@ -157,19 +186,121 @@ async def cb_admin_buy_sim_menu(call: CallbackQuery) -> None:
         if not _is_admin(u):
             await call.answer("Нет доступа", show_alert=True)
             return
+        kb = await _admin_buy_sim_keyboard(
+            session,
+            telegram_id=call.from_user.id,
+            username=call.from_user.username,
+            full_name=call.from_user.full_name,
+        )
 
     await call.answer()
     text = _admin_buy_sim_menu_caption()
     try:
-        await call.message.edit_text(text, reply_markup=admin_buy_sim_inline_kb())
+        await call.message.edit_text(text, reply_markup=kb)
     except Exception:
-        await call.message.answer(text, reply_markup=admin_buy_sim_inline_kb())
+        await call.message.answer(text, reply_markup=kb)
 
 
-@admin_router.callback_query(F.data.startswith("admin:buy_sim:"))
-async def cb_admin_buy_sim_apply(call: CallbackQuery) -> None:
+@admin_router.callback_query(F.data == "admin:buy_sim:tk")
+async def cb_admin_buy_sim_trial_extra(call: CallbackQuery) -> None:
+    async with async_session_factory() as session:
+        user = await get_or_create_user(
+            session=session,
+            telegram_id=call.from_user.id,
+            username=call.from_user.username,
+            full_name=call.from_user.full_name,
+        )
+        if not _is_admin(user):
+            await call.answer("Нет доступа", show_alert=True)
+            return
+
+        keys = await list_user_vless_keys(session, user_id=user.id)
+        if not await user_can_add_extra_key_trial(session, user=user, keys_count=len(keys)):
+            await call.answer("Сейчас нельзя добавить доп. ключ.", show_alert=True)
+            return
+
+        xui = XUIAPI()
+        try:
+            try:
+                url = await create_extra_vless_key_trial(session=session, user=user, xui=xui)
+            except ServiceError as e:
+                await call.answer(str(e), show_alert=True)
+                return
+        finally:
+            await xui.close()
+
+    await call.answer("Ключ добавлен (тест)")
+    deadline = trial_extra_deadline_phrase_ru(settings.EXTRA_KEY_TRIAL_MINUTES)
+    await call.message.answer(
+        "[Тест, без оплаты] Теперь у вас есть дополнительный ключ:\n\n"
+        f"{vless_url_as_html_code(url)}\n\n"
+        f"Активируйте его и купите подписку на этот ключ {deadline}, иначе ключ будет удалён.",
+        parse_mode="HTML",
+    )
+    await call.message.answer(
+        "Теперь Вы можете скопировать ссылку в Ваше приложение\n\n"
+        "Выберите платформу для инструкции:",
+        reply_markup=vless_connection_help_kb(),
+    )
+
+
+@admin_router.callback_query(F.data.startswith("admin:buy_sim:k:"))
+async def cb_admin_buy_sim_pick_key(call: CallbackQuery) -> None:
     assert call.data is not None
-    part = call.data.split(":")[-1]
+    try:
+        key_id = int(call.data.split(":")[3])
+    except (IndexError, ValueError):
+        await call.answer("Некорректный ключ.", show_alert=True)
+        return
+
+    async with async_session_factory() as session:
+        user = await get_or_create_user(
+            session=session,
+            telegram_id=call.from_user.id,
+            username=call.from_user.username,
+            full_name=call.from_user.full_name,
+        )
+        if not _is_admin(user):
+            await call.answer("Нет доступа", show_alert=True)
+            return
+        row = await list_user_vless_keys(session, user_id=user.id)
+        owned = any(k.id == key_id for k in row)
+        if not owned:
+            await call.answer("Ключ не найден.", show_alert=True)
+            return
+
+    await call.answer()
+    text = "Выберите срок продления для этого ключа (тест, без оплаты)."
+    try:
+        await call.message.edit_text(
+            text,
+            reply_markup=admin_buy_plans_for_key_inline_kb(key_id=key_id),
+        )
+    except Exception:
+        await call.message.answer(
+            text,
+            reply_markup=admin_buy_plans_for_key_inline_kb(key_id=key_id),
+        )
+
+
+@admin_router.callback_query(F.data.startswith("admin:buy_sim:m:"))
+async def cb_admin_buy_sim_apply_months(call: CallbackQuery) -> None:
+    assert call.data is not None
+    parts = call.data.split(":")
+    if len(parts) != 5 or parts[0] != "admin" or parts[1] != "buy_sim" or parts[2] != "m":
+        await call.answer("Неизвестный вариант.", show_alert=True)
+        return
+    rcode, kid_s = parts[3], parts[4]
+    months_map = {"r1": 1, "r3": 3, "r6": 6, "r12": 12}
+    months = months_map.get(rcode)
+    if months is None:
+        await call.answer("Неизвестный вариант.", show_alert=True)
+        return
+    try:
+        key_id = int(kid_s)
+    except ValueError:
+        await call.answer("Неизвестный вариант.", show_alert=True)
+        return
 
     async with async_session_factory() as session:
         user = await get_or_create_user(
@@ -182,57 +313,41 @@ async def cb_admin_buy_sim_apply(call: CallbackQuery) -> None:
             await call.answer("Нет доступа", show_alert=True)
             return
 
-        if part == "ek":
-            keys = await list_user_vless_keys(session, user_id=user.id)
-            if not _is_subscription_active(user):
-                await call.answer("Нужна активная подписка.", show_alert=True)
-                return
-            if len(keys) < 1:
-                await call.answer("Сначала создайте первый ключ в «Мой VPN».", show_alert=True)
-                return
-            if not user_can_buy_extra_key(user=user, keys_count=len(keys)):
-                await call.answer("Достигнут лимит ключей.", show_alert=True)
-                return
+        if await get_user_vless_key_owned(session, key_id=key_id, telegram_id=user.telegram_id) is None:
+            await call.answer("Ключ не найден.", show_alert=True)
+            return
 
-            xui = XUIAPI()
+        xui = XUIAPI()
+        try:
             try:
-                try:
-                    url = await create_extra_vless_key_after_payment(
-                        session=session, user=user, xui=xui
-                    )
-                except ServiceError as e:
-                    await call.answer(str(e), show_alert=True)
-                    return
-            finally:
-                await xui.close()
+                user_after, key_row = await extend_subscription_for_key(
+                    session,
+                    telegram_id=user.telegram_id,
+                    key_id=key_id,
+                    months=months,
+                )
+                await push_key_expiry_to_xui(
+                    xui,
+                    vless_uuid=key_row.vless_uuid,
+                    vless_email=key_row.vless_email,
+                    subscription_end=key_row.subscription_end,
+                )
+            except LookupError:
+                await call.answer("Ключ не найден.", show_alert=True)
+                return
+            except Exception as e:
+                await call.answer(str(e), show_alert=True)
+                return
+        finally:
+            await xui.close()
 
-            await call.answer("Ключ добавлен (тест)")
-            await call.message.answer(
-                "[Тест, без оплаты] Новый ключ:\n\n" + vless_url_as_html_code(url),
-                parse_mode="HTML",
-            )
-            await call.message.answer(
-                "Теперь Вы можете скопировать ссылку в Ваше приложение\n\n"
-                "Выберите платформу для инструкции:",
-                reply_markup=vless_connection_help_kb(),
-            )
-            return
-
-        months_map = {"r1": 1, "r3": 3, "r6": 6, "r12": 12}
-        months = months_map.get(part)
-        if months is None:
-            await call.answer("Неизвестный вариант.", show_alert=True)
-            return
-
-        user_after = await extend_subscription(
-            session, telegram_id=user.telegram_id, months=months
-        )
-        await call.answer("Готово")
-        await call.message.answer(
-            f"[Тест, без оплаты] Подписка продлена на {months} мес.\n"
-            f"Окончание: {format_datetime_ru(user_after.subscription_end)}",
-            reply_markup=admin_main_inline_kb(),
-        )
+    await call.answer("Готово")
+    await call.message.answer(
+        f"[Тест, без оплаты] Ключ продлён на {months} мес.\n"
+        f"Окончание ключа: {format_datetime_ru(key_row.subscription_end)}\n"
+        f"Сводка по аккаунту: {format_datetime_ru(user_after.subscription_end)}",
+        reply_markup=admin_main_inline_kb(),
+    )
 
 
 @admin_router.callback_query(F.data.startswith("admin:users:"))

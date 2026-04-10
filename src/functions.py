@@ -334,6 +334,33 @@ class XUIAPI:
         if client_id and not await self._client_exists(inbound_id=inbound_id, client_id=client_id, email=client_email):
             raise RuntimeError("Client was not found in inbound after add/update fallback")
 
+    async def update_client_expiry_ms(
+        self,
+        *,
+        inbound_id: int,
+        client_id: str,
+        expiry_ms: int,
+        email: Optional[str] = None,
+    ) -> None:
+        """Обновить только expiryTime у клиента во входящем (полная перезапись списка clients)."""
+
+        inbound = await self.get_inbound(inbound_id)
+        clients = self._extract_clients_from_inbound(inbound)
+        cid = str(client_id).strip()
+        found = False
+        for c in clients:
+            if str(c.get("id", "")).strip() == cid:
+                c["expiryTime"] = int(expiry_ms)
+                found = True
+                break
+            if email and str(c.get("email", "")).strip() == str(email).strip():
+                c["expiryTime"] = int(expiry_ms)
+                found = True
+                break
+        if not found:
+            raise RuntimeError(f"Client id={cid!r} not found in inbound {inbound_id} for expiry update")
+        await self.update_inbound_clients(inbound_id=inbound_id, clients=clients)
+
     async def remove_client(self, *, inbound_id: int, client_id: str) -> None:
         """
         Remove client from an inbound.

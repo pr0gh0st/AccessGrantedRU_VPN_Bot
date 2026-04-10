@@ -19,7 +19,8 @@ from aiogram.types import (
 from .config import settings
 from .database import (
     async_session_factory,
-    extend_subscription,
+    extend_subscription_for_key,
+    get_user_vless_key_owned,
     list_user_vless_keys,
     payment_log_exists_by_telegram_charge,
     reset_trial_for_user,
@@ -30,7 +31,8 @@ from .admin_handlers import admin_router
 from .client_guide import GUIDE_PART1_BY_PLATFORM, routing_message_html
 from .keyboards import (
     admin_main_inline_kb,
-    buy_plans_inline_kb,
+    buy_key_pick_inline_kb,
+    buy_plans_for_key_inline_kb,
     confirm_delete_all_vpn_kb,
     confirm_delete_key_kb,
     help_inline_kb,
@@ -43,17 +45,24 @@ from .keyboards import (
 from .services import (
     ServiceError,
     activate_trial_and_create_vless_profile,
-    create_extra_vless_key_after_payment,
+    create_extra_vless_key_trial,
     delete_single_vless_key_for_user,
     delete_vless_profile_for_user,
     ensure_vless_profile_for_user,
     fetch_and_update_traffic_for_user,
     get_or_create_user,
+    push_key_expiry_to_xui,
     user_can_activate_trial,
-    user_can_buy_extra_key,
+    user_can_add_extra_key_trial,
     _is_subscription_active,
 )
-from .utils import format_bytes_gb, format_datetime_ru, format_price_minor, vless_url_as_html_code
+from .utils import (
+    format_bytes_gb,
+    format_datetime_ru,
+    format_price_minor,
+    trial_extra_deadline_phrase_ru,
+    vless_url_as_html_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +73,6 @@ _RE_VPN_DEL = re.compile(r"^vpn:del:(\d+)$")
 _RE_VPN_DEL_YES = re.compile(r"^vpn:del_yes:(\d+)$")
 _RE_VPN_DEL_NO = re.compile(r"^vpn:del_no:(\d+)$")
 _RE_VPN_SHOW = re.compile(r"^vpn:show:(\d+)$")
-
-_INVOICE_PAYLOAD_EXTRA_KEY = "ek"
-
 
 def _now_utc() -> dt.datetime:
     return dt.datetime.now(tz=dt.timezone.utc)
@@ -83,14 +89,17 @@ def _profile_status_text(user: Any) -> str:
     )
 
 
-def _myvpn_status_text(user: Any, *, keys_count: int) -> str:
+def _myvpn_status_text(user: Any, *, keys: list[Any]) -> str:
     subscription_active = _is_subscription_active(user)
-    return (
-        "Мой VPN\n"
-        f"Подписка активна: {'да' if subscription_active else 'нет'}\n"
-        f"Окончание подписки: {format_datetime_ru(user.subscription_end)}\n"
-        f"Ключей: {keys_count} из {settings.MAX_VLESS_KEYS}"
-    )
+    lines = [
+        "Мой VPN",
+        f"Есть активный доступ: {'да' if subscription_active else 'нет'}",
+        f"Сводка по аккаунту (макс. срок): {format_datetime_ru(user.subscription_end)}",
+        f"Ключей: {len(keys)} из {settings.MAX_VLESS_KEYS}",
+    ]
+    for i, k in enumerate(keys):
+        lines.append(f"  Ключ №{i + 1}: до {format_datetime_ru(k.subscription_end)}")
+    return "\n".join(lines)
 
 
 async def _get_user_for_message(session, tg_user) -> Any:
@@ -149,7 +158,7 @@ async def help_handler(message: Message) -> None:
         "/profile — статус подписки\n"
         "/myvpn — ключи VPN (несколько), показать и удалить\n"
         "/traffic — статистика трафика\n"
-        "/buy — доп. ключ или продление подписки\n\n"
+        "/buy — продление срока выбранного ключа\n\n"
         "Если возникли вопросы — напишите в поддержку.",
         reply_markup=help_inline_kb(),
     )
@@ -167,18 +176,35 @@ async def profile_handler(message: Message, event_user: Optional[TgUser] = None)
 @router.message(Command("buy"))
 async def buy_handler(message: Message) -> None:
     cur = settings.CURRENCY
+    async with async_session_factory() as session:
+        user = await _get_user_for_message(session, message.from_user)
+        keys = await list_user_vless_keys(session, user_id=user.id)
+
+    if not keys:
+        await message.answer(
+            "Сначала создайте хотя бы один ключ в разделе «Мой VPN» (trial или после оплаты).",
+            reply_markup=main_menu_inline_kb(),
+        )
+        return
+
+    pick_rows: list[tuple[str, str]] = []
+    for i, k in enumerate(keys):
+        label = f"Ключ №{i + 1} · до {format_datetime_ru(k.subscription_end)}"
+        if len(label) > 58:
+            label = label[:55] + "…"
+        pick_rows.append((label, f"buy:pk:{k.id}"))
+
     await message.answer(
         "Покупка\n\n"
-        "• Дополнительный VLESS-ключ (к активной подписке)\n"
-        "• Продление подписки на 1 / 3 / 6 / 12 месяцев\n\n"
-        f"Цены: доп. ключ — {format_price_minor(settings.PRICE_EXTRA_VLESS_KEY, cur)}; "
-        f"1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
+        "Срок доступа считается отдельно для каждого ключа. Выберите ключ, который нужно продлить, "
+        "затем срок — откроется счёт Telegram Payments.\n\n"
+        f"Цены: 1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
         f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
         f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
         f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}.\n\n"
-        "Выберите вариант — откроется счёт Telegram Payments.\n"
-        "Админам: такое же меню без оплаты — «Меню покупки (тест)» в /admin.",
-        reply_markup=buy_plans_inline_kb(),
+        "Дополнительный ключ на 60 минут — бесплатно в «Мой VPN».\n"
+        "Админам: тест без оплаты — «Тест покупки» в /admin.",
+        reply_markup=buy_key_pick_inline_kb(pick_rows),
     )
 
 
@@ -201,11 +227,13 @@ async def myvpn_handler(message: Message, event_user: Optional[TgUser] = None) -
         return
 
     can_create_first = keys_count == 0
-    show_buy_extra = user_can_buy_extra_key(user=user, keys_count=keys_count) and keys_count >= 1
+    show_buy_extra = await user_can_add_extra_key_trial(
+        session, user=user, keys_count=keys_count
+    )
     show_delete_all = keys_count >= 2
 
     await message.answer(
-        _myvpn_status_text(user, keys_count=keys_count),
+        _myvpn_status_text(user, keys=keys),
         reply_markup=vpn_keys_inline_kb(
             key_rows=key_rows,
             subscription_active=subscription_active,
@@ -373,8 +401,6 @@ async def vpn_show_key_callback(call: CallbackQuery) -> None:
 
     async with async_session_factory() as session:
         user = await _get_user_for_message(session, call.from_user)
-        from .database import get_user_vless_key_owned
-
         key = await get_user_vless_key_owned(session, key_id=key_id, telegram_id=user.telegram_id)
 
     if not _is_subscription_active(user):
@@ -426,7 +452,7 @@ async def vpn_create_callback(call: CallbackQuery) -> None:
         existing = await list_user_vless_keys(session, user_id=user.id)
         if existing:
             await call.answer(
-                "Первый ключ уже есть. Дополнительные — через «Купить доп. ключ» в «Мой VPN» или /buy.",
+                "Первый ключ уже есть. Дополнительные — кнопка «Доп. ключ (60 мин бесплатно)» в «Мой VPN».",
                 show_alert=True,
             )
             return
@@ -446,6 +472,37 @@ async def vpn_create_callback(call: CallbackQuery) -> None:
     await call.message.answer("Профиль создан.")
     await call.message.answer(
         "VLESS ссылка:\n\n" + vless_url_as_html_code(vless_url),
+        parse_mode="HTML",
+    )
+    await _send_vless_connection_help(call.message)
+
+
+@router.callback_query(F.data == "vpn:trial_extra")
+async def vpn_trial_extra_callback(call: CallbackQuery) -> None:
+    async with async_session_factory() as session:
+        user = await _get_user_for_message(session, call.from_user)
+        keys = await list_user_vless_keys(session, user_id=user.id)
+        keys_count = len(keys)
+        if not await user_can_add_extra_key_trial(session, user=user, keys_count=keys_count):
+            await call.answer("Сейчас нельзя добавить дополнительный ключ.", show_alert=True)
+            return
+
+        xui = XUIAPI()
+        try:
+            try:
+                vless_url = await create_extra_vless_key_trial(session=session, user=user, xui=xui)
+            except ServiceError as e:
+                await call.answer(str(e), show_alert=True)
+                return
+        finally:
+            await xui.close()
+
+    await call.answer()
+    deadline = trial_extra_deadline_phrase_ru(settings.EXTRA_KEY_TRIAL_MINUTES)
+    await call.message.answer(
+        "Теперь у вас есть дополнительный ключ:\n\n"
+        f"{vless_url_as_html_code(vless_url)}\n\n"
+        f"Активируйте его и купите подписку на этот ключ {deadline}, иначе ключ будет удалён.",
         parse_mode="HTML",
     )
     await _send_vless_connection_help(call.message)
@@ -549,45 +606,114 @@ async def vpn_delete_all_no_callback(call: CallbackQuery) -> None:
     await myvpn_handler(call.message, call.from_user)
 
 
-@router.callback_query(F.data == "buy:inv:ek")
-async def buy_invoice_extra_key_callback(call: CallbackQuery, bot: Bot) -> None:
-    await call.answer()
-    await bot.send_invoice(
-        chat_id=call.message.chat.id,
-        title="Дополнительный ключ VPN",
-        description="Ещё один VLESS-клиент к текущей подписке.",
-        payload=_INVOICE_PAYLOAD_EXTRA_KEY,
-        provider_token=settings.PAYMENT_TOKEN,
-        currency=settings.CURRENCY,
-        prices=[LabeledPrice(label="Доп. ключ VPN", amount=settings.PRICE_EXTRA_VLESS_KEY)],
-    )
+def _parse_buy_invoice_callback(data: str) -> Optional[tuple[int, int, int, str, int]]:
+    """Возвращает (months, amount, label_short, payload, key_id) или None."""
+
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "buy" or parts[1] != "inv":
+        return None
+    rcode, kid_s = parts[2], parts[3]
+    try:
+        key_id = int(kid_s)
+    except ValueError:
+        return None
+    row = {
+        "r1": (1, settings.PRICE_1_MONTH, "Продление 1 мес"),
+        "r3": (3, settings.PRICE_3_MONTHS, "Продление 3 мес"),
+        "r6": (6, settings.PRICE_6_MONTHS, "Продление 6 мес"),
+        "r12": (12, settings.PRICE_12_MONTHS, "Продление 12 мес"),
+    }.get(rcode)
+    if row is None:
+        return None
+    months, amount, label = row
+    payload = f"{rcode}:{key_id}"
+    return months, amount, label, payload, key_id
 
 
-@router.callback_query(
-    F.data.in_(
-        {
-            "buy:inv:r1",
-            "buy:inv:r3",
-            "buy:inv:r6",
-            "buy:inv:r12",
-        }
-    )
-)
-async def buy_invoice_renew_callback(call: CallbackQuery, bot: Bot) -> None:
+@router.callback_query(F.data.startswith("buy:pk:"))
+async def buy_pick_key_callback(call: CallbackQuery) -> None:
     assert call.data is not None
-    spec = {
-        "buy:inv:r1": (1, settings.PRICE_1_MONTH, "Продление 1 мес"),
-        "buy:inv:r3": (3, settings.PRICE_3_MONTHS, "Продление 3 мес"),
-        "buy:inv:r6": (6, settings.PRICE_6_MONTHS, "Продление 6 мес"),
-        "buy:inv:r12": (12, settings.PRICE_12_MONTHS, "Продление 12 мес"),
-    }[call.data]
-    months, amount, label = spec
+    try:
+        key_id = int(call.data.split(":")[2])
+    except (IndexError, ValueError):
+        await call.answer("Некорректный ключ.", show_alert=True)
+        return
+
+    async with async_session_factory() as session:
+        user = await _get_user_for_message(session, call.from_user)
+        row = await get_user_vless_key_owned(session, key_id=key_id, telegram_id=user.telegram_id)
+        if row is None:
+            await call.answer("Ключ не найден.", show_alert=True)
+            return
+
+    await call.answer()
+    text = "Выберите срок продления для этого ключа (счёт Telegram Payments)."
+    try:
+        await call.message.edit_text(
+            text,
+            reply_markup=buy_plans_for_key_inline_kb(key_id=key_id),
+        )
+    except Exception:
+        await call.message.answer(
+            text,
+            reply_markup=buy_plans_for_key_inline_kb(key_id=key_id),
+        )
+
+
+@router.callback_query(F.data == "buy:back_keys")
+async def buy_back_to_keys_callback(call: CallbackQuery) -> None:
+    async with async_session_factory() as session:
+        user = await _get_user_for_message(session, call.from_user)
+        keys = await list_user_vless_keys(session, user_id=user.id)
+
+    if not keys:
+        await call.answer()
+        await call.message.edit_text("Ключей нет.", reply_markup=main_menu_inline_kb())
+        return
+
+    pick_rows: list[tuple[str, str]] = []
+    for i, k in enumerate(keys):
+        label = f"Ключ №{i + 1} · до {format_datetime_ru(k.subscription_end)}"
+        if len(label) > 58:
+            label = label[:55] + "…"
+        pick_rows.append((label, f"buy:pk:{k.id}"))
+
+    await call.answer()
+    try:
+        await call.message.edit_text(
+            "Выберите ключ для продления:",
+            reply_markup=buy_key_pick_inline_kb(pick_rows),
+        )
+    except Exception:
+        await call.message.answer(
+            "Выберите ключ для продления:",
+            reply_markup=buy_key_pick_inline_kb(pick_rows),
+        )
+
+
+@router.callback_query(F.data.startswith("buy:inv:"))
+async def buy_invoice_for_key_callback(call: CallbackQuery, bot: Bot) -> None:
+    assert call.data is not None
+    parsed = _parse_buy_invoice_callback(call.data)
+    if parsed is None:
+        await call.answer("Неизвестный тариф.", show_alert=True)
+        return
+
+    months, amount, label, payload, key_id = parsed
+
+    async with async_session_factory() as session:
+        user = await _get_user_for_message(session, call.from_user)
+        row = await get_user_vless_key_owned(session, key_id=key_id, telegram_id=user.telegram_id)
+        if row is None:
+            await call.answer("Ключ не найден.", show_alert=True)
+            return
+
     await call.answer()
     await bot.send_invoice(
         chat_id=call.message.chat.id,
         title=label,
-        description=f"Продление подписки на {months} мес.",
-        payload=f"r{months}",
+        description=f"Продление ключа на {months} мес.",
+        payload=payload,
         provider_token=settings.PAYMENT_TOKEN,
         currency=settings.CURRENCY,
         prices=[LabeledPrice(label=label, amount=amount)],
@@ -596,29 +722,31 @@ async def buy_invoice_renew_callback(call: CallbackQuery, bot: Bot) -> None:
 
 @router.pre_checkout_query()
 async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery) -> None:
-    payload = pre_checkout_query.invoice_payload
+    payload = pre_checkout_query.invoice_payload or ""
     try:
+        if ":" not in payload:
+            await pre_checkout_query.answer(ok=False, error_message="Неизвестный тариф.")
+            return
+        plan_code, _, key_id_s = payload.rpartition(":")
+        if not plan_code or not key_id_s:
+            await pre_checkout_query.answer(ok=False, error_message="Неизвестный тариф.")
+            return
+        try:
+            key_id = int(key_id_s)
+        except ValueError:
+            await pre_checkout_query.answer(ok=False, error_message="Неизвестный тариф.")
+            return
+        if plan_code not in ("r1", "r3", "r6", "r12"):
+            await pre_checkout_query.answer(ok=False, error_message="Неизвестный тариф.")
+            return
+
         async with async_session_factory() as session:
             user = await _get_user_for_message(session, pre_checkout_query.from_user)
-            keys = await list_user_vless_keys(session, user_id=user.id)
-
-            if payload == _INVOICE_PAYLOAD_EXTRA_KEY:
-                if not _is_subscription_active(user):
-                    await pre_checkout_query.answer(ok=False, error_message="Подписка не активна.")
-                    return
-                if len(keys) < 1:
-                    await pre_checkout_query.answer(
-                        ok=False,
-                        error_message="Сначала создайте первый ключ бесплатно в «Мой VPN».",
-                    )
-                    return
-                if len(keys) >= settings.MAX_VLESS_KEYS:
-                    await pre_checkout_query.answer(ok=False, error_message="Достигнут лимит ключей.")
-                    return
-            elif payload in ("r1", "r3", "r6", "r12"):
-                pass
-            else:
-                await pre_checkout_query.answer(ok=False, error_message="Неизвестный тариф.")
+            row = await get_user_vless_key_owned(
+                session, key_id=key_id, telegram_id=user.telegram_id
+            )
+            if row is None:
+                await pre_checkout_query.answer(ok=False, error_message="Ключ не найден.")
                 return
     except Exception:
         logger.exception("pre_checkout_query")
@@ -643,57 +771,54 @@ async def successful_payment_handler(message: Message) -> None:
         payload = sp.invoice_payload
 
         try:
-            if payload == _INVOICE_PAYLOAD_EXTRA_KEY:
-                xui = XUIAPI()
-                try:
-                    url = await create_extra_vless_key_after_payment(
-                        session=session, user=user, xui=xui
-                    )
-                finally:
-                    await xui.close()
-                await save_payment_log(
-                    session,
-                    telegram_id=user.telegram_id,
-                    amount=sp.total_amount,
-                    currency=(sp.currency or settings.CURRENCY).upper(),
-                    plan_code="extra_vless_key",
-                    months=0,
-                    payload=payload,
-                    provider_payment_charge_id=sp.provider_payment_charge_id,
-                    telegram_payment_charge_id=sp.telegram_payment_charge_id,
-                    status="completed",
-                )
-                await message.answer(
-                    "Оплата принята. Новый ключ:\n\n" + vless_url_as_html_code(url),
-                    parse_mode="HTML",
-                )
-                await _send_vless_connection_help(message)
+            if ":" not in (payload or ""):
+                await message.answer("Неизвестный тип платежа.")
                 return
-
+            plan_code, _, key_id_s = (payload or "").rpartition(":")
             months_map = {"r1": 1, "r3": 3, "r6": 6, "r12": 12}
-            months = months_map.get(payload)
+            months = months_map.get(plan_code)
             if months is None:
                 await message.answer("Неизвестный тип платежа.")
                 return
+            try:
+                key_id = int(key_id_s)
+            except ValueError:
+                await message.answer("Неизвестный тип платежа.")
+                return
 
-            user_after = await extend_subscription(
-                session, telegram_id=user.telegram_id, months=months
-            )
+            xui = XUIAPI()
+            try:
+                user_after, key_row = await extend_subscription_for_key(
+                    session,
+                    telegram_id=user.telegram_id,
+                    key_id=key_id,
+                    months=months,
+                )
+                await push_key_expiry_to_xui(
+                    xui,
+                    vless_uuid=key_row.vless_uuid,
+                    vless_email=key_row.vless_email,
+                    subscription_end=key_row.subscription_end,
+                )
+            finally:
+                await xui.close()
+
             await save_payment_log(
                 session,
                 telegram_id=user.telegram_id,
                 amount=sp.total_amount,
                 currency=(sp.currency or settings.CURRENCY).upper(),
-                plan_code=f"renew_{months}m",
+                plan_code=f"renew_key_{months}m",
                 months=months,
-                payload=payload,
+                payload=payload or "",
                 provider_payment_charge_id=sp.provider_payment_charge_id,
                 telegram_payment_charge_id=sp.telegram_payment_charge_id,
                 status="completed",
             )
             await message.answer(
-                f"Оплата принята. Подписка продлена на {months} мес.\n"
-                f"Окончание: {format_datetime_ru(user_after.subscription_end)}",
+                f"Оплата принята. Срок выбранного ключа продлён на {months} мес.\n"
+                f"Окончание ключа: {format_datetime_ru(key_row.subscription_end)}\n"
+                f"Сводка по аккаунту: {format_datetime_ru(user_after.subscription_end)}",
                 reply_markup=main_menu_inline_kb(),
             )
         except Exception as e:

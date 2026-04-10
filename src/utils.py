@@ -55,6 +55,15 @@ def vless_url_as_html_code(vless_url: str) -> str:
     return f"<code>{html_module.escape(vless_url)}</code>"
 
 
+def trial_extra_deadline_phrase_ru(minutes: int) -> str:
+    """Фраза «в течение …» для срока бесплатного доп. ключа."""
+
+    m = max(1, int(minutes))
+    if m == 60:
+        return "в течение часа"
+    return f"в течение {m} минут"
+
+
 def truncate_payload(text: str, *, max_len: int = 512) -> str:
     text = str(text)
     if len(text) <= max_len:
