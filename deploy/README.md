@@ -1,5 +1,27 @@
 # Запуск бота на VPS (systemd + пользователь `vpn-bot`)
 
+## Debian 12: нет команды `sudo`
+
+**Вариант A — выполнять админ-команды от root.** Зайдите под root (`su -` с паролем root или SSH под root, если так настроено) и используйте команды **без** префикса `sudo`:
+
+| Было (с sudo) | Становится (под root) |
+|----------------|------------------------|
+| `sudo systemctl restart vpn-bot.service` | `systemctl restart vpn-bot.service` |
+| `sudo cp ... /etc/systemd/system/` | `cp ... /etc/systemd/system/` |
+| `sudo -u vpn-bot -H bash -lc '...'` | `su - vpn-bot -s /bin/bash -c '...'` |
+
+**Вариант B — поставить sudo** (один раз под root):
+
+```bash
+apt update && apt install -y sudo
+```
+
+Дальше можно снова пользоваться `sudo`, как в остальной инструкции.
+
+**Вариант C — user-systemd (рекомендуется, если не хотите ни sudo, ни постоянный root):** один раз настраивает **root**, дальше `vpn-bot` управляет сервисом **без** `sudo` — через `systemctl --user` (см. [раздел «User systemd»](#user-systemd-без-sudo-для-vpn-bot) ниже).
+
+---
+
 Инструкция с учётом **вашего текущего размещения**:
 
 | Что | Путь |
@@ -126,4 +148,55 @@ sudo systemctl restart vpn-bot.service
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl restart vpn-bot.service
+```
+
+(Без `sudo`, под root: те же команды без префикса `sudo`.)
+
+---
+
+## User systemd: без sudo для `vpn-bot`
+
+Сервис крутится в сессии пользователя `vpn-bot`; перезапуск — командами **`systemctl --user`** (пароль root не нужен).
+
+### Один раз под root
+
+Включить «linger», чтобы user-сервисы жили без активного входа:
+
+```bash
+loginctl enable-linger vpn-bot
+```
+
+Каталог и unit:
+
+```bash
+install -d -o vpn-bot -g vpn-bot /home/vpn-bot/.config/systemd/user
+cp /home/vpn-bot/apps/vpn-bot/deploy/vpn-bot.user.service /home/vpn-bot/.config/systemd/user/vpn-bot.service
+chown vpn-bot:vpn-bot /home/vpn-bot/.config/systemd/user/vpn-bot.service
+```
+
+Если раньше был **системный** сервис с тем же именем — отключите его под root, чтобы не было двух копий:
+
+```bash
+systemctl disable --now vpn-bot.service 2>/dev/null || true
+```
+
+### Под пользователем `vpn-bot`
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now vpn-bot.service
+systemctl --user status vpn-bot.service
+```
+
+Дальше без root и без sudo:
+
+```bash
+systemctl --user restart vpn-bot.service
+journalctl --user -u vpn-bot.service -f
+```
+
+Обновление кода:
+
+```bash
+cd ~/apps/vpn-bot && git pull && systemctl --user restart vpn-bot.service
 ```
