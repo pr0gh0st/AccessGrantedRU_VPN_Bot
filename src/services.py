@@ -114,6 +114,18 @@ def _build_vless_url_for_key(
     )
 
 
+def _xui_client_email_and_remark(*, telegram_id: int, key_index: int) -> tuple[str, str]:
+    """
+    Первый ключ: email user-<tg>, фрагмент URL AccessGranted-user-<tg> (без -k1).
+    Доп. ключи: user-<tg>-kN и ...-kN для N >= 2.
+    """
+
+    tid = int(telegram_id)
+    if key_index <= 1:
+        return f"user-{tid}", f"AccessGranted-user-{tid}"
+    return f"user-{tid}-k{key_index}", f"AccessGranted-user-{tid}-k{key_index}"
+
+
 async def activate_trial_and_create_vless_profile(
     *,
     session: AsyncSession,
@@ -134,8 +146,9 @@ async def activate_trial_and_create_vless_profile(
         raise ServiceError("Trial уже использован.")
 
     vless_uuid = str(uuid.uuid4())
-    vless_email = f"user-{user.telegram_id}"
-    vless_remark = f"AccessGranted-user-{user.telegram_id}-k1"
+    vless_email, vless_remark = _xui_client_email_and_remark(
+        telegram_id=user.telegram_id, key_index=1
+    )
 
     inbound = await xui.get_inbound(settings.INBOUND_ID)
     port = inbound.get("port")
@@ -240,9 +253,9 @@ async def ensure_vless_profile_for_user(
     reality_params = xui.extract_reality_params_from_inbound(inbound)
 
     vless_uuid = str(uuid.uuid4())
-    n = 1
-    vless_email = f"user-{user.telegram_id}-k{n}"
-    vless_remark = f"AccessGranted-user-{user.telegram_id}-k{n}"
+    vless_email, vless_remark = _xui_client_email_and_remark(
+        telegram_id=user.telegram_id, key_index=1
+    )
     client_settings = {
         "id": vless_uuid,
         "email": vless_email,
@@ -311,8 +324,9 @@ async def create_extra_vless_key_trial(
 
     n = n_existing + 1
     vless_uuid = str(uuid.uuid4())
-    vless_email = f"user-{user.telegram_id}-k{n}"
-    vless_remark = f"AccessGranted-user-{user.telegram_id}-k{n}"
+    vless_email, vless_remark = _xui_client_email_and_remark(
+        telegram_id=user.telegram_id, key_index=n
+    )
     client_settings = {
         "id": vless_uuid,
         "email": vless_email,
