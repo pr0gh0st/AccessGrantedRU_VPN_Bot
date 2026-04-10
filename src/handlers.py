@@ -174,16 +174,36 @@ async def profile_handler(message: Message, event_user: Optional[TgUser] = None)
 
 
 @router.message(Command("buy"))
-async def buy_handler(message: Message) -> None:
+async def buy_handler(message: Message, event_user: Optional[TgUser] = None) -> None:
+    # Из callback «Купить подписку» у call.message.from_user часто бот — передаём call.from_user.
+    tg = event_user if event_user is not None else message.from_user
     cur = settings.CURRENCY
+    price_lines = (
+        f"Цены: 1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
+        f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
+        f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
+        f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}."
+    )
     async with async_session_factory() as session:
-        user = await _get_user_for_message(session, message.from_user)
+        user = await _get_user_for_message(session, tg)
         keys = await list_user_vless_keys(session, user_id=user.id)
 
         if not keys:
             await message.answer(
                 "Сначала создайте хотя бы один ключ в разделе «Мой VPN» (trial или после оплаты).",
                 reply_markup=main_menu_inline_kb(),
+            )
+            return
+
+        if len(keys) == 1:
+            only = keys[0]
+            await message.answer(
+                "Покупка\n\n"
+                "У вас один ключ — выберите срок продления (откроется счёт Telegram Payments).\n"
+                f"Срок сейчас: {format_datetime_ru(only.subscription_end)}\n\n"
+                f"{price_lines}\n\n"
+                "Дополнительный ключ на 60 минут — бесплатно в «Мой VPN».",
+                reply_markup=buy_plans_for_key_inline_kb(key_id=only.id, back_callback="nav:menu"),
             )
             return
 
@@ -196,12 +216,9 @@ async def buy_handler(message: Message) -> None:
 
         await message.answer(
             "Покупка\n\n"
-            "Срок доступа считается отдельно для каждого ключа. Выберите ключ, который нужно продлить, "
+            "Срок доступа считается отдельно для каждого ключа (включая trial). Выберите ключ для продления, "
             "затем срок — откроется счёт Telegram Payments.\n\n"
-            f"Цены: 1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
-            f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
-            f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
-            f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}.\n\n"
+            f"{price_lines}\n\n"
             "Дополнительный ключ на 60 минут — бесплатно в «Мой VPN».\n"
             "Админам: тест без оплаты — «Тест покупки» в /admin.",
             reply_markup=buy_key_pick_inline_kb(pick_rows),
@@ -319,7 +336,7 @@ async def nav_callback_handler(call: CallbackQuery) -> None:
         await traffic_handler(call.message, call.from_user)
     elif action == "buy":
         await call.answer()
-        await buy_handler(call.message)
+        await buy_handler(call.message, call.from_user)
     elif action == "help":
         await call.answer()
         await help_handler(call.message)
