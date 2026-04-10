@@ -6,6 +6,7 @@ import re
 from typing import Any, Optional
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -745,15 +746,55 @@ async def buy_invoice_for_key_callback(call: CallbackQuery, bot: Bot) -> None:
             return
 
     await call.answer()
-    await bot.send_invoice(
-        chat_id=call.message.chat.id,
-        title=label,
-        description=f"Продление ключа на {months} мес.",
-        payload=payload,
-        provider_token=settings.PAYMENT_TOKEN,
-        currency=settings.CURRENCY,
-        prices=[LabeledPrice(label=label, amount=amount)],
-    )
+
+    if amount <= 0:
+        err = "Тариф не настроен (цена 0). Напишите администратору."
+        if isinstance(call.message, Message):
+            await call.message.answer(err, reply_markup=main_menu_inline_kb())
+        else:
+            await bot.send_message(call.from_user.id, err, reply_markup=main_menu_inline_kb())
+        return
+
+    cur_u = (settings.CURRENCY or "").upper()
+    if not settings.PAYMENT_TOKEN and cur_u != "XTR":
+        err = "Платежи не настроены (нет PAYMENT_TOKEN)."
+        if isinstance(call.message, Message):
+            await call.message.answer(err, reply_markup=main_menu_inline_kb())
+        else:
+            await bot.send_message(call.from_user.id, err, reply_markup=main_menu_inline_kb())
+        return
+
+    msg = call.message
+    if isinstance(msg, Message) and msg.chat is not None:
+        chat_id = msg.chat.id
+    else:
+        chat_id = call.from_user.id
+
+    title = label[:32]
+    description = f"Продление ключа на {months} мес."[:255]
+    price_label = label[:255]
+    tg_bot = getattr(call, "bot", None) or bot
+
+    try:
+        await tg_bot.send_invoice(
+            chat_id=chat_id,
+            title=title,
+            description=description,
+            payload=payload,
+            provider_token=settings.PAYMENT_TOKEN,
+            currency=settings.CURRENCY,
+            prices=[LabeledPrice(label=price_label, amount=amount)],
+        )
+    except TelegramAPIError:
+        logger.exception("send_invoice failed payload=%s chat_id=%s", payload, chat_id)
+        err = "Не удалось выставить счёт. Попробуйте позже или напишите в поддержку."
+        try:
+            if isinstance(call.message, Message):
+                await call.message.answer(err, reply_markup=main_menu_inline_kb())
+            else:
+                await tg_bot.send_message(chat_id, err, reply_markup=main_menu_inline_kb())
+        except TelegramAPIError:
+            logger.exception("notify after send_invoice failure")
 
 
 @router.pre_checkout_query()
