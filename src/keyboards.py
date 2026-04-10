@@ -4,6 +4,9 @@ from typing import Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from .config import settings
+from .utils import format_price_minor
+
 
 def main_menu_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -92,20 +95,70 @@ def confirm_delete_all_vpn_kb() -> InlineKeyboardMarkup:
     )
 
 
-def buy_plans_inline_kb() -> InlineKeyboardMarkup:
+def _buy_plans_kb(
+    *,
+    cb_ek: str,
+    cb_r1: str,
+    cb_r3: str,
+    cb_r6: str,
+    cb_r12: str,
+    back_cb: str,
+) -> InlineKeyboardMarkup:
+    cur = settings.CURRENCY
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Доп. ключ VPN", callback_data="buy:inv:ek")],
             [
-                InlineKeyboardButton(text="1 мес", callback_data="buy:inv:r1"),
-                InlineKeyboardButton(text="3 мес", callback_data="buy:inv:r3"),
+                InlineKeyboardButton(
+                    text=f"Доп. ключ · {format_price_minor(settings.PRICE_EXTRA_VLESS_KEY, cur)}",
+                    callback_data=cb_ek,
+                )
             ],
             [
-                InlineKeyboardButton(text="6 мес", callback_data="buy:inv:r6"),
-                InlineKeyboardButton(text="12 мес", callback_data="buy:inv:r12"),
+                InlineKeyboardButton(
+                    text=f"1 мес · {format_price_minor(settings.PRICE_1_MONTH, cur)}",
+                    callback_data=cb_r1,
+                ),
+                InlineKeyboardButton(
+                    text=f"3 мес · {format_price_minor(settings.PRICE_3_MONTHS, cur)}",
+                    callback_data=cb_r3,
+                ),
             ],
-            [InlineKeyboardButton(text="Главное меню", callback_data="nav:menu")],
+            [
+                InlineKeyboardButton(
+                    text=f"6 мес · {format_price_minor(settings.PRICE_6_MONTHS, cur)}",
+                    callback_data=cb_r6,
+                ),
+                InlineKeyboardButton(
+                    text=f"12 мес · {format_price_minor(settings.PRICE_12_MONTHS, cur)}",
+                    callback_data=cb_r12,
+                ),
+            ],
+            [InlineKeyboardButton(text="Назад", callback_data=back_cb)],
         ]
+    )
+
+
+def buy_plans_inline_kb() -> InlineKeyboardMarkup:
+    return _buy_plans_kb(
+        cb_ek="buy:inv:ek",
+        cb_r1="buy:inv:r1",
+        cb_r3="buy:inv:r3",
+        cb_r6="buy:inv:r6",
+        cb_r12="buy:inv:r12",
+        back_cb="nav:menu",
+    )
+
+
+def admin_buy_sim_inline_kb() -> InlineKeyboardMarkup:
+    """То же меню цен, что у пользователей; callback — без оплаты (только админ)."""
+
+    return _buy_plans_kb(
+        cb_ek="admin:buy_sim:ek",
+        cb_r1="admin:buy_sim:r1",
+        cb_r3="admin:buy_sim:r3",
+        cb_r6="admin:buy_sim:r6",
+        cb_r12="admin:buy_sim:r12",
+        back_cb="admin:menu",
     )
 
 
@@ -148,6 +201,7 @@ def admin_main_inline_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Рассылка", callback_data="admin:broadcast")],
             [InlineKeyboardButton(text="Статические профили", callback_data="admin:static")],
             [InlineKeyboardButton(text="Платежи", callback_data="admin:payments")],
+            [InlineKeyboardButton(text="Меню покупки (тест, без оплаты)", callback_data="admin:buy_sim_menu")],
             [InlineKeyboardButton(text="Сбросить trial себе", callback_data="admin:reset_trial_self")],
             [InlineKeyboardButton(text="Назад в меню", callback_data="nav:menu")],
         ]

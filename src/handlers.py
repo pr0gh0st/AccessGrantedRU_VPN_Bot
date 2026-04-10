@@ -53,7 +53,7 @@ from .services import (
     user_can_buy_extra_key,
     _is_subscription_active,
 )
-from .utils import format_bytes_gb, format_datetime_ru, vless_url_as_html_code
+from .utils import format_bytes_gb, format_datetime_ru, format_price_minor, vless_url_as_html_code
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +166,18 @@ async def profile_handler(message: Message, event_user: Optional[TgUser] = None)
 
 @router.message(Command("buy"))
 async def buy_handler(message: Message) -> None:
+    cur = settings.CURRENCY
     await message.answer(
         "Покупка\n\n"
         "• Дополнительный VLESS-ключ (к активной подписке)\n"
         "• Продление подписки на 1 / 3 / 6 / 12 месяцев\n\n"
-        "Выберите вариант — откроется счёт Telegram Payments.",
+        f"Цены: доп. ключ — {format_price_minor(settings.PRICE_EXTRA_VLESS_KEY, cur)}; "
+        f"1 мес — {format_price_minor(settings.PRICE_1_MONTH, cur)}; "
+        f"3 мес — {format_price_minor(settings.PRICE_3_MONTHS, cur)}; "
+        f"6 мес — {format_price_minor(settings.PRICE_6_MONTHS, cur)}; "
+        f"12 мес — {format_price_minor(settings.PRICE_12_MONTHS, cur)}.\n\n"
+        "Выберите вариант — откроется счёт Telegram Payments.\n"
+        "Админам: такое же меню без оплаты — «Меню покупки (тест)» в /admin.",
         reply_markup=buy_plans_inline_kb(),
     )
 

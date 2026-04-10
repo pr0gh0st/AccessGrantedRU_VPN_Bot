@@ -29,6 +29,26 @@ def format_datetime_ru(value: Optional[dt.datetime]) -> str:
     return local.strftime("%Y-%m-%d %H:%M МСК")
 
 
+def format_price_minor(amount: int, currency: str) -> str:
+    """
+    Человекочитаемая цена из минорных единиц валюты (как в Telegram Payments).
+
+    RUB — копейки (30000 → «300 ₽»), USD/EUR — центы.
+    """
+
+    c = (currency or "").strip().upper() or "USD"
+    amount = max(0, int(amount))
+    if c == "RUB":
+        rub = amount // 100
+        kop = amount % 100
+        if kop:
+            return f"{rub},{kop:02d} ₽"
+        return f"{rub} ₽"
+    if c in ("USD", "EUR"):
+        return f"{amount / 100:.2f} {c}"
+    return f"{amount} {c}"
+
+
 def vless_url_as_html_code(vless_url: str) -> str:
     """Telegram HTML: VLESS-ссылка в моноширинном блоке для удобного копирования."""
 
