@@ -160,11 +160,28 @@ sudo systemctl restart vpn-bot.service
 
 ### Один раз под root
 
-Включить «linger», чтобы user-сервисы жили без активного входа:
+**1. Пакет пользовательской шины D-Bus** (без него `systemctl --user` часто падает с `Failed to connect to bus` / «No medium found»):
+
+```bash
+apt update
+apt install -y dbus-user-session
+```
+
+**2. Linger** — чтобы user-сервисы работали без залогиненной интерактивной сессии:
 
 ```bash
 loginctl enable-linger vpn-bot
 ```
+
+Проверка:
+
+```bash
+loginctl show-user vpn-bot -p Linger
+```
+
+Должно быть: `Linger=yes`.
+
+**3. Перезагрузка VPS** (или полный выход `vpn-bot` из SSH и новый вход) — чтобы подтянулась сессия с user-bus.
 
 Каталог и unit:
 
@@ -182,11 +199,37 @@ systemctl disable --now vpn-bot.service 2>/dev/null || true
 
 ### Под пользователем `vpn-bot`
 
+Сначала убедитесь, что есть каталог рантайма (после `linger` и перезагрузки/нового входа):
+
+```bash
+ls -ld /run/user/$(id -u)
+echo "$XDG_RUNTIME_DIR"
+```
+
+Если `XDG_RUNTIME_DIR` пустой, но каталог `/run/user/ВАШ_UID` есть:
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+```
+
+Можно добавить эту строку в `~/.profile` у `vpn-bot`, чтобы она подставлялась при каждом SSH.
+
+Дальше:
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now vpn-bot.service
 systemctl --user status vpn-bot.service
 ```
+
+### Если снова `Failed to connect to bus`
+
+1. Под **root**: выполнены ли `apt install dbus-user-session` и `loginctl enable-linger vpn-bot`?
+2. Была ли **перезагрузка** или новый вход по SSH после этого?
+3. Есть ли `/run/user/UID` у `vpn-bot` и задан ли `XDG_RUNTIME_DIR` (см. выше)?
+4. Вход по SSH лучше с TTY: `ssh -t user@host` (иногда без `-t` сессия logind считается неполной).
+
+Если user-systemd на хостинге так и не заводится — остаётся **системный** `vpn-bot.service` под root (`/etc/systemd/system/`) и перезапуск от root или установка пакета `sudo` (см. начало этого файла).
 
 Дальше без root и без sudo:
 
