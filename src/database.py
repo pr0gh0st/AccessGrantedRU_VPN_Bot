@@ -361,7 +361,8 @@ async def extend_subscription_for_key(
         base_end = now
 
     new_end = _add_months_to_datetime(base_end, months)
-    if user.subscription_start is None or user.subscription_start <= now - dt.timedelta(days=365 * 100):
+    ss = _normalize_db_dt(user.subscription_start)
+    if ss is None or ss <= now - dt.timedelta(days=365 * 100):
         user.subscription_start = now
 
     key.subscription_end = new_end
@@ -814,7 +815,8 @@ async def extend_subscription_by_days(session: AsyncSession, *, telegram_id: int
     delta = dt.timedelta(days=abs(days))
     day_shift = dt.timedelta(days=days)
     if days > 0:
-        base = user.subscription_end or now
+        raw_end = user.subscription_end
+        base = _normalize_db_dt(raw_end) if raw_end is not None else now
         if base <= now:
             base = now
         new_end = base + delta
@@ -825,7 +827,9 @@ async def extend_subscription_by_days(session: AsyncSession, *, telegram_id: int
     else:
         if user.subscription_end is None:
             raise ValueError("Нет даты окончания подписки — уменьшать нечего")
-        new_end = user.subscription_end - delta
+        cur_end = _normalize_db_dt(user.subscription_end)
+        assert cur_end is not None
+        new_end = cur_end - delta
         user.subscription_end = new_end
         if new_end <= now:
             user.is_active = False
@@ -833,7 +837,9 @@ async def extend_subscription_by_days(session: AsyncSession, *, telegram_id: int
     keys = await list_user_vless_keys(session, user_id=user.id)
     for k in keys:
         if k.subscription_end is not None:
-            k.subscription_end = k.subscription_end + day_shift
+            ke = _normalize_db_dt(k.subscription_end)
+            if ke is not None:
+                k.subscription_end = ke + day_shift
 
     await session.commit()
     if keys:
