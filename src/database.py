@@ -32,6 +32,16 @@ def _utc_now() -> dt.datetime:
     return dt.datetime.now(tz=dt.timezone.utc)
 
 
+def _normalize_db_dt(value: Optional[dt.datetime]) -> Optional[dt.datetime]:
+    """SQLite часто отдаёт naive UTC; приводим к aware для сравнений с _utc_now()."""
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
 def _add_months_to_datetime(value: dt.datetime, months: int) -> dt.datetime:
     """
     Add months to a datetime without external dependencies.
@@ -314,7 +324,8 @@ async def sync_user_subscription_aggregate(session: AsyncSession, *, user_id: in
         await session.commit()
         return user
 
-    ends = [k.subscription_end for k in keys if k.subscription_end is not None]
+    ends = [_normalize_db_dt(k.subscription_end) for k in keys if k.subscription_end is not None]
+    ends = [e for e in ends if e is not None]
     if not ends:
         user.is_active = False
         await session.commit()
@@ -344,7 +355,8 @@ async def extend_subscription_for_key(
         raise LookupError("User not found")
 
     now = _utc_now()
-    base_end = key.subscription_end or now
+    raw_ke = key.subscription_end
+    base_end = _normalize_db_dt(raw_ke) if raw_ke is not None else now
     if base_end <= now:
         base_end = now
 

@@ -293,7 +293,11 @@ async def create_extra_vless_key_trial(
         raise ServiceError(f"Достигнут лимит ключей ({settings.MAX_VLESS_KEYS}).")
 
     now = _utc_now()
-    if not any(k.subscription_end and k.subscription_end > now for k in keys):
+    has_active_key = any(
+        (end := _normalize_db_datetime_utc(k.subscription_end)) is not None and end > now
+        for k in keys
+    )
+    if not has_active_key and not _is_subscription_active(user):
         raise ServiceError("Нужен хотя бы один ключ с не истёкшим сроком доступа.")
 
     trial_end = now + dt.timedelta(minutes=settings.EXTRA_KEY_TRIAL_MINUTES)
@@ -437,4 +441,9 @@ async def user_can_add_extra_key_trial(
         return False
     keys = await list_user_vless_keys(session, user_id=user.id)
     now = _utc_now()
-    return any(k.subscription_end and k.subscription_end > now for k in keys)
+    for k in keys:
+        end = _normalize_db_datetime_utc(k.subscription_end)
+        if end is not None and end > now:
+            return True
+    # Ключи без даты в строке (старые данные / сбой миграции), но подписка на users ещё активна
+    return _is_subscription_active(user)

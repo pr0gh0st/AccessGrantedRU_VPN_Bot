@@ -288,8 +288,27 @@ async def nav_callback_handler(call: CallbackQuery) -> None:
     assert call.data is not None
     action = call.data.split(":", 1)[1]
     if action == "menu":
-        await call.message.edit_text("Меню:", reply_markup=main_menu_inline_kb())
-    elif action == "profile":
+        await call.answer()
+        msg = call.message
+        if msg is None:
+            if call.from_user is not None:
+                await call.bot.send_message(
+                    chat_id=call.from_user.id,
+                    text="Меню:",
+                    reply_markup=main_menu_inline_kb(),
+                )
+            return
+        try:
+            await msg.edit_text("Меню:", reply_markup=main_menu_inline_kb())
+        except Exception:
+            await msg.answer("Меню:", reply_markup=main_menu_inline_kb())
+        return
+
+    if call.message is None or call.from_user is None:
+        await call.answer("Сообщение устарело. Отправьте /menu или /start.", show_alert=True)
+        return
+
+    if action == "profile":
         await call.answer()
         await profile_handler(call.message, call.from_user)
     elif action == "myvpn":
